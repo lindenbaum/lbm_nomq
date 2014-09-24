@@ -38,7 +38,7 @@ all_test_() ->
       fun basic_push/0,
       fun multiple_subscribers/0,
       fun late_subscribe/0,
-      fun massive_concurrency/0
+      {timeout, 60, fun massive_concurrency/0}
      ]}.
 
 basic_subscribe() ->
@@ -97,7 +97,7 @@ late_subscribe() ->
     {error, timeout} = lbm_nomq:push(?TOPIC, msg, 100).
 
 massive_concurrency() ->
-    Messages = lists:seq(1, 1000),
+    Messages = lists:seq(1, 20000),
     Num = length(Messages) div 2,
     F = fun() ->
                 {S1, _} = spawn_monitor(subscriber(?TOPIC, Messages, Num)),
@@ -158,7 +158,7 @@ call(Pid, Term) ->
             erlang:demonitor(Ref),
             ok;
         {'DOWN', Ref, _, Pid, _} ->
-            {error, no_receiver}
+            exit({error, no_receiver})
     end.
 
 %%------------------------------------------------------------------------------

@@ -50,9 +50,7 @@
 
 -export_type([topic/0, mfargs/0]).
 
--define(TIMEOUT_MSG, {?MODULE, timeout}).
-
--record(subscr, {mfa :: mfargs()}).
+-include("lbm_nomq.hrl").
 
 %%%=============================================================================
 %%% API
@@ -91,14 +89,14 @@ subscribe_fsm(Topic) -> subscribe(Topic, {gen_fsm, sync_send_event, [self()]}).
 %% @end
 %%------------------------------------------------------------------------------
 -spec subscribe(topic(), mfargs()) -> ok | {error, term()}.
-subscribe(Topic, MFA = {M, F, As}) when is_list(As) ->
+subscribe(Topic, {M, F, As}) when is_list(As) ->
     case code:ensure_loaded(M) of
         {module, M} ->
             case erlang:function_exported(M, F, length(As) + 1) of
                 true ->
-                    add_subscriber(Topic, #subscr{mfa = MFA});
+                    add_subscriber(Topic, ?SUBSCRIBER(M, F, As));
                 false when M =:= erlang ->
-                    add_subscriber(Topic, #subscr{mfa = MFA});
+                    add_subscriber(Topic, ?SUBSCRIBER(M, F, As));
                 false ->
                     {error, {undef, {F, length(As) + 1}}}
             end;
@@ -149,7 +147,7 @@ stop(_State) -> ok.
 %%------------------------------------------------------------------------------
 init([]) ->
     ok = lbm_kv:create(?MODULE),
-    {ok, {{one_for_one, 0, 1}, []}}.
+    {ok, {{one_for_one, 0, 1}, [spec(lbm_nomq_mon, [])]}}.
 
 %%%=============================================================================
 %%% lbm_kv callbacks
@@ -167,8 +165,13 @@ resolve_conflict(_Node) -> ok.
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-add_subscriber(Topic, S = #subscr{}) ->
-    Fun = fun([Ss]) -> [lists:usort([S | Ss])]; (_) -> [[S]] end,
+spec(M, As) -> {M, {M, start_link, As}, permanent, 1000, worker, [M]}.
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+add_subscriber(Topic, S = ?SUBSCRIBER(_, _, _)) ->
+    Fun = fun([Ss]) -> [[S | Ss]]; (_) -> [[S]] end,
     case lbm_kv:update(?MODULE, Topic, Fun) of
         {ok, _} ->
             ok;
@@ -187,24 +190,6 @@ get_subscribers(Topic) ->
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-del_subscribers(_Topic, []) ->
-    ok;
-del_subscribers(Topic, BadSs) ->
-    Fun = fun([Ss]) ->
-                  case Ss -- BadSs of
-                      [] ->
-                          [];
-                      NewSs ->
-                          [NewSs]
-                  end;
-             (Other) ->
-                  Other
-          end,
-    lbm_kv:update(?MODULE, Topic, Fun).
-
-%%------------------------------------------------------------------------------
-%% @private
-%%------------------------------------------------------------------------------
 shuffle(L) when is_list(L) ->
     shuffle(L, length(L)).
 shuffle(L, Len) ->
@@ -214,80 +199,54 @@ shuffle(L, Len) ->
 %% @private
 %%------------------------------------------------------------------------------
 push_loop([], BadSs, Topic, Msg, Timeout) ->
-    del_subscribers(Topic, BadSs),
-    case wait(Topic, Timeout) of
+    {ok, PushRef} = lbm_nomq_mon:add_waiting(Topic, BadSs),
+    case wait(Topic, PushRef, Timeout, send_after(Timeout, Topic, PushRef)) of
         {ok, {Subscribers, Time}} ->
             push_loop(Subscribers, [], Topic, Msg, Time);
         Error ->
             Error
     end;
-push_loop([S = #subscr{mfa = {M, F, As}} | Ss], BadSs, Topic, Msg, Timeout) ->
+push_loop([S = ?SUBSCRIBER(M, F, As) | Ss], BadSs, Topic, Msg, Timeout) ->
     try erlang:apply(M, F, As ++ [Msg]) of
-        {error, _} ->
-            push_loop(Ss, [S | BadSs], Topic, Msg, Timeout);
-        _ ->
-            del_subscribers(Topic, BadSs),
-            ok
+        Result ->
+            ok = lbm_nomq_mon:del_subscribers(Topic, BadSs),
+            Result
     catch
-        _:_ -> push_loop(Ss, [S | BadSs], Topic, Msg, Timeout)
+        exit:_  -> push_loop(Ss, [S | BadSs], Topic, Msg, Timeout);
+        _:_     -> push_loop(Ss, BadSs, Topic, Msg, Timeout)
     end.
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-wait(Topic, Timeout) ->
-    ok = lbm_kv:subscribe(?MODULE),
-    case get_subscribers(Topic) of
-        [] ->
-            wait_loop(Topic, send_after(Timeout, ?TIMEOUT_MSG));
-        Ss ->
-            ok = lbm_kv:unsubscribe(?MODULE),
-            ok = flush_table_events(),
-            {ok, {Ss, Timeout}}
-    end.
-
-%%------------------------------------------------------------------------------
-%% @private
-%%------------------------------------------------------------------------------
-wait_loop(Topic, TimerRef) ->
+wait(Topic, PushRef, Timeout, TimerRef) ->
     receive
-        {mnesia_table_event, {write, {?MODULE, Topic, []}, _}} ->
-            wait_loop(Topic, TimerRef);
-        {mnesia_table_event, {write, {?MODULE, Topic, Subscribers}, _}} ->
-            Time = cancel_timer(TimerRef, ?TIMEOUT_MSG),
-            ok = lbm_kv:unsubscribe(?MODULE),
-            ok = flush_table_events(),
-            {ok, {Subscribers, Time}};
-        {mnesia_table_event, _} ->
-            wait_loop(Topic, TimerRef);
-        ?TIMEOUT_MSG ->
-            ok = lbm_kv:unsubscribe(?MODULE),
-            ok = flush_table_events(),
-            {error, timeout}
+        ?UPDATE_MSG(PushRef, Topic, timeout) ->
+            lbm_nomq_mon:del_waiting(Topic, PushRef),
+            {error, timeout};
+        ?UPDATE_MSG(PushRef, Topic, Subscribers) ->
+            Time = cancel_timer(TimerRef, Timeout, Topic, PushRef),
+            {ok, {Subscribers, Time}}
     end.
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-flush_table_events() ->
-    receive {mnesia_table_event, _} -> flush_table_events() after 0 -> ok end.
-
-%%------------------------------------------------------------------------------
-%% @private
-%%------------------------------------------------------------------------------
-send_after(Timeout, Message) when is_integer(Timeout) ->
-    erlang:send_after(Timeout, self(), Message);
-send_after(infinity, _Message) ->
+send_after(Timeout, Topic, Ref) when is_integer(Timeout) ->
+    erlang:send_after(Timeout, self(), ?UPDATE_MSG(Ref, Topic, timeout));
+send_after(infinity, _Topic, _Ref) ->
     erlang:make_ref().
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-cancel_timer(TimerRef, Message) ->
+cancel_timer(TimerRef, Timeout, Topic, Ref) ->
     case erlang:cancel_timer(TimerRef) of
-        false ->
+        false when is_integer(Timeout) ->
             %% cleanup the message queue in case timer was already delivered
-            receive Message -> 0 after 0 -> 0 end;
+            receive ?UPDATE_MSG(Ref, Topic, _) -> 0 after 0 -> 0 end;
+        false when Timeout =:= infinity ->
+            Timeout;
         Time when is_integer(Time) ->
             Time
     end.

@@ -4,7 +4,7 @@
   {vsn, "1.0.0"},
   {registered,
    [
-
+    lbm_nomq_mon
    ]},
   {applications,
    [
