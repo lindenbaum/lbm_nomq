@@ -38,7 +38,8 @@ all_test_() ->
       fun basic_push/0,
       fun multiple_subscribers/0,
       fun late_subscribe/0,
-      {timeout, 60, fun massive_concurrency/0}
+      {timeout, 60, fun concurrency/0},
+      {timeout, 60, fun concurrency_subscriber_exits/0}
      ]}.
 
 basic_subscribe() ->
@@ -47,7 +48,11 @@ basic_subscribe() ->
     receive {'DOWN', _, process, S, normal} -> ok end.
 
 no_subscribers() ->
-    {error, timeout} = lbm_nomq:push(?TOPIC, msg, 100).
+    try lbm_nomq:push(?TOPIC, msg, 100) of
+        _ -> throw(test_failed)
+    catch
+        exit:{timeout, {lbm_nomq, push, [?TOPIC, msg, 100]}} -> ok
+    end.
 
 basic_push() ->
     Messages = [msg1, msg2, msg3],
@@ -60,7 +65,7 @@ basic_push() ->
     receive {'DOWN', _, process, S, normal} -> ok end,
     receive {'DOWN', _, process, P, normal} -> ok end,
 
-    {error, timeout} = lbm_nomq:push(?TOPIC, msg, 100).
+    {'EXIT', {timeout, _}} = (catch lbm_nomq:push(?TOPIC, msg, 100)).
 
 multiple_subscribers() ->
     {S1, _} = spawn_monitor(subscriber(?TOPIC, [stop])),
@@ -79,7 +84,7 @@ multiple_subscribers() ->
     receive {'DOWN', _, process, S3, normal} -> ok end,
     receive {'DOWN', _, process, P, normal} -> ok end,
 
-    {error, timeout} = lbm_nomq:push(?TOPIC, msg, 100).
+    {'EXIT', {timeout, _}} = (catch lbm_nomq:push(?TOPIC, msg, 100)).
 
 late_subscribe() ->
     Messages = [msg1, msg2, msg3],
@@ -94,9 +99,21 @@ late_subscribe() ->
     receive {'DOWN', _, process, P, normal} -> ok end,
     receive {'DOWN', _, process, S, normal} -> ok end,
 
-    {error, timeout} = lbm_nomq:push(?TOPIC, msg, 100).
+    {'EXIT', {timeout, _}} = (catch lbm_nomq:push(?TOPIC, msg, 100)).
 
-massive_concurrency() ->
+concurrency() ->
+    Messages = lists:seq(1, 20000),
+    F = fun() ->
+                {S1, _} = spawn_monitor(subscriber(?TOPIC, Messages)),
+                Ps = [spawn_monitor(pusher(?TOPIC, [M])) || M <- Messages],
+
+                [receive {'DOWN', _, _, P, normal} -> ok end || {P, _} <- Ps],
+                receive {'DOWN', _, process, S1, normal} -> ok end
+        end,
+    Time = element(1, timer:tc(F)),
+    ?DBG("~p MESSAGES TOOK ~pms~n", [length(Messages), Time / 1000]).
+
+concurrency_subscriber_exits() ->
     Messages = lists:seq(1, 20000),
     Num = length(Messages) div 2,
     F = fun() ->

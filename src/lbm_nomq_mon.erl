@@ -9,6 +9,13 @@
 %%% @copyright (C) 2014, Lindenbaum GmbH
 %%%
 %%% @doc
+%%% A monitoring server that mirrors the persistent subscriber state (using a
+%%% `lbm_kv' subscription). This is done to optimise writes to the persistent
+%%% background storage.
+%%%
+%%% If a process does not find subscribers for its topic it registeres at this
+%%% server to get a notification as soon as new subscribers for its topic are
+%%% available.
 %%% @end
 %%%=============================================================================
 
@@ -145,7 +152,7 @@ terminate(_Reason, _State) -> lbm_kv:unsubscribe(?TABLE).
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-handle_mnesia({write, R = {?TABLE, Topic, Subscribers}, _}, State) ->
+handle_mnesia({write, {?TABLE, Topic, Subscribers}, _}, State) ->
     put_topic(Topic, Subscribers, State);
 handle_mnesia({delete_object, {?TABLE, Topic, _Subscribers}, _}, State) ->
     del_topic(Topic, State);
@@ -156,6 +163,9 @@ handle_mnesia(_, State) ->
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Put subscribers for a topic into state. If list of subscribers is empty,
+%% delete topic. If new subscribers were add waiting processes will be notified
+%% (and removed).
 %%------------------------------------------------------------------------------
 put_topic(Topic, [], State) ->
     del_topic(Topic, State); %% removing update, no notification
@@ -178,6 +188,8 @@ del_topic(Topic, State = #state{s = S}) ->
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Delete subscribers detected as bad. If the process state indicates a change
+%% in subscribers, try to update lbm_kv subscriptions.
 %%------------------------------------------------------------------------------
 del_subscribers(Topic, BadSs, State = #state{s = S}) ->
     Subscribers = maps:get(Topic, S, []),
@@ -204,6 +216,9 @@ del_subscribers(Topic, BadSs, State = #state{s = S}) ->
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Adds a process to the processes waiting for subscribers of a certain topic.
+%% If valid subscribers for the topic are available, the process will not be
+%% added and notified instead.
 %%------------------------------------------------------------------------------
 add_waiting(Topic, Who, State = #state{s = S, w = W}) ->
     case maps:get(Topic, S, []) of
@@ -218,12 +233,15 @@ add_waiting(Topic, Who, State = #state{s = S, w = W}) ->
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Remove a waiting process for a topic.
 %%------------------------------------------------------------------------------
 del_waiting(Topic, Who, State = #state{w = W}) ->
     del_waiting(Topic, Who, maps:get(Topic, W, []), State).
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Remove a waiting process for a topic. Deletes the topic entry, if no more
+%% waiting processes are available.
 %%------------------------------------------------------------------------------
 del_waiting(_Topic, _Who, [], State) ->
     State;
@@ -234,6 +252,7 @@ del_waiting(Topic, Who, Waiting, State = #state{w = W}) ->
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Notify a waiting process, by ordinary message.
 %%------------------------------------------------------------------------------
 notify_waiting(Whos, Topic, Subscribers) ->
     [Pid ! ?UPDATE_MSG(Ref, Topic, Subscribers) || {Pid, Ref} <- Whos].

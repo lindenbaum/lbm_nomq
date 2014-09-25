@@ -45,8 +45,8 @@
 %% lbm_kv callbacks
 -export([resolve_conflict/1]).
 
--type topic()  :: term().
--type mfargs() :: {module(), function(), [term()]}.
+-type topic()  :: any().
+-type mfargs() :: {module(), atom(), [term()]}.
 
 -export_type([topic/0, mfargs/0]).
 
@@ -59,7 +59,8 @@
 %%------------------------------------------------------------------------------
 %% @doc
 %% Similar to {@link subscribe/2} with `MFA' set to
-%% `{gen_server, call, [self()]}'.
+%% `{gen_server, call, [self()]}'. The subscribed `gen_server' will receive the
+%% pushed messages in its `handle_call/3' function.
 %% @end
 %%------------------------------------------------------------------------------
 -spec subscribe_server(topic()) -> ok | {error, term()}.
@@ -68,7 +69,8 @@ subscribe_server(Topic) -> subscribe(Topic, {gen_server, call, [self()]}).
 %%------------------------------------------------------------------------------
 %% @doc
 %% Similar to {@link subscribe/2} with `MFA' set to
-%% `{gen_fsm, sync_send_event, [self()]}'.
+%% `{gen_fsm, sync_send_event, [self()]}'.  The subscribed `gen_fsm' will
+%% receive the pushed messages in its `StateName/3' function.
 %% @end
 %%------------------------------------------------------------------------------
 -spec subscribe_fsm(topic()) -> ok | {error, term()}.
@@ -77,7 +79,9 @@ subscribe_fsm(Topic) -> subscribe(Topic, {gen_fsm, sync_send_event, [self()]}).
 %%------------------------------------------------------------------------------
 %% @doc
 %% Subscribes `MFA' as listener for a certain topic. Messages will be delivered
-%% to the process using `erlang:appy(M, F, As ++ Message)'.
+%% to the process using `erlang:appy(M, F, As ++ Message)'. The function must
+%% adhere to the `gen:call/4' protocol. This means that if the function returns
+%% without exiting, the message is considered to be consumed successfully.
 %%
 %% It is possible to have multiple subscribers for a topic. However, a message
 %% will be pushed to at most one subscriber. The subscriber for a message will
@@ -109,7 +113,7 @@ subscribe(Topic, {M, F, As}) when is_list(As) ->
 %% Similar to {@link push/3} with `Timeout' set to `infinity'.
 %% @end
 %%------------------------------------------------------------------------------
--spec push(topic(), term()) -> ok | {error, term()}.
+-spec push(topic(), term()) -> any().
 push(Topic, Message) -> push(Topic, Message, infinity).
 
 %%------------------------------------------------------------------------------
@@ -118,9 +122,12 @@ push(Topic, Message) -> push(Topic, Message, infinity).
 %% until the message has successfully consumed by exactly one subscriber. If
 %% there are no subscribers available for `Topic' the process will wait for
 %% subscribers up to `Timeout' millis.
+%%
+%% If a push finally fails, the caller will be exited with
+%% `exit({timeout, {lbm_nomq, push, [Topic, Msg, Timeout]}})'.
 %% @end
 %%------------------------------------------------------------------------------
--spec push(topic(), term(), integer() | infinity) -> ok | {error, term()}.
+-spec push(topic(), term(), integer() | infinity) -> any().
 push(Topic, Message, Timeout) ->
     push_loop(get_subscribers(Topic), [], Topic, Message, Timeout).
 
@@ -146,7 +153,7 @@ stop(_State) -> ok.
 %% @private
 %%------------------------------------------------------------------------------
 init([]) ->
-    ok = lbm_kv:create(?MODULE),
+    ok = lbm_kv:create(?TABLE),
     {ok, {{one_for_one, 0, 1}, [spec(lbm_nomq_mon, [])]}}.
 
 %%%=============================================================================
@@ -155,6 +162,9 @@ init([]) ->
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Basically ignore conflicting `lbm_kv' tables, since bad subscribers will be
+%% sorted out on the fly and updates will propagate new subscribers
+%% automatically.
 %%------------------------------------------------------------------------------
 resolve_conflict(_Node) -> ok.
 
@@ -172,7 +182,7 @@ spec(M, As) -> {M, {M, start_link, As}, permanent, 1000, worker, [M]}.
 %%------------------------------------------------------------------------------
 add_subscriber(Topic, S = ?SUBSCRIBER(_, _, _)) ->
     Fun = fun([Ss]) -> [[S | Ss]]; (_) -> [[S]] end,
-    case lbm_kv:update(?MODULE, Topic, Fun) of
+    case lbm_kv:update(?TABLE, Topic, Fun) of
         {ok, _} ->
             ok;
         Error ->
@@ -184,7 +194,7 @@ add_subscriber(Topic, S = ?SUBSCRIBER(_, _, _)) ->
 %% Only dirty reads can handle 10000+ concurrent reads.
 %%------------------------------------------------------------------------------
 get_subscribers(Topic) ->
-    SsList = lbm_kv:get(?MODULE, Topic, dirty),
+    SsList = lbm_kv:get(?TABLE, Topic, dirty),
     lists:append([shuffle(Ss) || Ss <- SsList, is_list(Ss)]).
 
 %%------------------------------------------------------------------------------
@@ -197,14 +207,17 @@ shuffle(L, Len) ->
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Try to push a message reliably to exactly one subscriber. If no good
+%% subscribers can be found, the loop will block the caller until either new
+%% subscribers register and handle the message or the given timeout expires.
 %%------------------------------------------------------------------------------
 push_loop([], BadSs, Topic, Msg, Timeout) ->
     {ok, PushRef} = lbm_nomq_mon:add_waiting(Topic, BadSs),
     case wait(Topic, PushRef, Timeout, send_after(Timeout, Topic, PushRef)) of
         {ok, {Subscribers, Time}} ->
             push_loop(Subscribers, [], Topic, Msg, Time);
-        Error ->
-            Error
+        {error, timeout} ->
+            exit({timeout, {?MODULE, push, [Topic, Msg, Timeout]}})
     end;
 push_loop([S = ?SUBSCRIBER(M, F, As) | Ss], BadSs, Topic, Msg, Timeout) ->
     try erlang:apply(M, F, As ++ [Msg]) of
@@ -212,12 +225,22 @@ push_loop([S = ?SUBSCRIBER(M, F, As) | Ss], BadSs, Topic, Msg, Timeout) ->
             ok = lbm_nomq_mon:del_subscribers(Topic, BadSs),
             Result
     catch
-        exit:_  -> push_loop(Ss, [S | BadSs], Topic, Msg, Timeout);
-        _:_     -> push_loop(Ss, BadSs, Topic, Msg, Timeout)
+        exit:{timeout, _} ->
+            %% subscriber is not dead, only overloaded
+            push_loop(Ss, BadSs, Topic, Msg, Timeout);
+        exit:_  ->
+            push_loop(Ss, [S | BadSs], Topic, Msg, Timeout);
+        error:badarg when M =:= gen_fsm, is_atom(hd(As)) ->
+            %% for gen_fsm, when sending to invalid (local) registered name
+            push_loop(Ss, [S | BadSs], Topic, Msg, Timeout)
     end.
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Wait for either a timeout message (created with {@link send_after/3}) or a
+%% subscriber update from {@link lbm_nomq_mon}. This will also try to leave the
+%% callers message queue in a consistent state avoiding ghost messages beeing
+%% send to the calling process.
 %%------------------------------------------------------------------------------
 wait(Topic, PushRef, Timeout, TimerRef) ->
     receive
@@ -231,6 +254,8 @@ wait(Topic, PushRef, Timeout, TimerRef) ->
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Start a timer for the calling process, does nothing if `Timeout' is set to
+%% infinity.
 %%------------------------------------------------------------------------------
 send_after(Timeout, Topic, Ref) when is_integer(Timeout) ->
     erlang:send_after(Timeout, self(), ?UPDATE_MSG(Ref, Topic, timeout));
@@ -239,6 +264,9 @@ send_after(infinity, _Topic, _Ref) ->
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Cancel a timer created with {@link send_after/3}. And reports the remaining
+%% time. If the timer already expired the function tries to remove the timeout
+%% message from the process message queue.
 %%------------------------------------------------------------------------------
 cancel_timer(TimerRef, Timeout, Topic, Ref) ->
     case erlang:cancel_timer(TimerRef) of
