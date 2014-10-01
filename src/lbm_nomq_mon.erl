@@ -9,9 +9,8 @@
 %%% @copyright (C) 2014, Lindenbaum GmbH
 %%%
 %%% @doc
-%%% A monitoring server that mirrors the persistent subscriber state (using a
-%%% `lbm_kv' subscription). This is done to optimise writes to the persistent
-%%% background storage.
+%%% A monitoring server that mirrors the persistent subscriber state. This is
+%%% done to optimise writes to the persistent background storage.
 %%%
 %%% If a process does not find subscribers for its topic it registeres at this
 %%% server to get a notification as soon as new subscribers for its topic are
@@ -106,8 +105,7 @@ del_waiting_loop(Topic, Reference) ->
 %% @private
 %%------------------------------------------------------------------------------
 init([]) ->
-    ok = lbm_kv:subscribe(?TABLE),
-    Subscriptions = lbm_kv:get_all(?TABLE),
+    {ok, Subscriptions} = ?BACKEND:init(),
     {ok, #state{s = maps:from_list(Subscriptions), w = maps:new()}}.
 
 %%------------------------------------------------------------------------------
@@ -130,10 +128,13 @@ handle_cast(_Request, State) ->
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-handle_info({mnesia_table_event, Event}, State) ->
-    {noreply, handle_mnesia(Event, State)};
-handle_info(_Info, State) ->
-    {noreply, State}.
+handle_info(Info, State) ->
+    {noreply,
+     case ?BACKEND:handle_info(Info) of
+         {put, Topic, Subscribers} -> put_topic(Topic, Subscribers, State);
+         {delete, Topic}           -> del_topic(Topic, State);
+         ignore                    -> State
+     end}.
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -143,7 +144,7 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-terminate(_Reason, _State) -> lbm_kv:unsubscribe(?TABLE).
+terminate(_Reason, _State) -> ?BACKEND:destroy().
 
 %%%=============================================================================
 %%% Internal functions
@@ -151,24 +152,9 @@ terminate(_Reason, _State) -> lbm_kv:unsubscribe(?TABLE).
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Put subscribers for a topic into state. If new subscribers were add waiting
+%% processes will be notified (and removed).
 %%------------------------------------------------------------------------------
-handle_mnesia({write, {?TABLE, Topic, Subscribers}, _}, State) ->
-    put_topic(Topic, Subscribers, State);
-handle_mnesia({delete_object, {?TABLE, Topic, _Subscribers}, _}, State) ->
-    del_topic(Topic, State);
-handle_mnesia({delete, {?TABLE, Topic}, _}, State) ->
-    del_topic(Topic, State);
-handle_mnesia(_, State) ->
-    State.
-
-%%------------------------------------------------------------------------------
-%% @private
-%% Put subscribers for a topic into state. If list of subscribers is empty,
-%% delete topic. If new subscribers were add waiting processes will be notified
-%% (and removed).
-%%------------------------------------------------------------------------------
-put_topic(Topic, [], State) ->
-    del_topic(Topic, State); %% removing update, no notification
 put_topic(Topic, Subscribers, State = #state{s = S, w = W}) ->
     case maps:get(Topic, S, []) of
         Subscribers ->
@@ -189,7 +175,7 @@ del_topic(Topic, State = #state{s = S}) ->
 %%------------------------------------------------------------------------------
 %% @private
 %% Delete subscribers detected as bad. If the process state indicates a change
-%% in subscribers, try to update lbm_kv subscriptions.
+%% in subscribers, try to update the persistent backend storage.
 %%------------------------------------------------------------------------------
 del_subscribers(Topic, BadSs, State = #state{s = S}) ->
     Subscribers = maps:get(Topic, S, []),
@@ -198,15 +184,7 @@ del_subscribers(Topic, BadSs, State = #state{s = S}) ->
             %% no change, no write attempt
             State;
         _ ->
-            Fun = fun([]) ->
-                          [];
-                     ([Ss]) ->
-                          case Ss -- BadSs of
-                              []    -> [];
-                              NewSs -> [NewSs]
-                          end
-                  end,
-            case lbm_kv:update(?TABLE, Topic, Fun) of
+            case ?BACKEND:del(Topic, BadSs) of
                 {ok, []} ->
                     State#state{s = maps:without([Topic], S)};
                 {ok, [NewSs]} ->

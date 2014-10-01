@@ -40,7 +40,7 @@ waiting_gets_notified() ->
     {ok, Ref} = lbm_nomq_mon:add_waiting(?TOPIC, []),
 
     Ss = [waiting_gets_notified],
-    Write = {write, {?TABLE, ?TOPIC, Ss}, ignored},
+    Write = {write, {?BACKEND, ?TOPIC, Ss}, ignored},
     lbm_nomq_mon ! {mnesia_table_event, Write},
 
     receive ?UPDATE_MSG(Ref, ?TOPIC, Ss) -> ok end.
@@ -49,7 +49,7 @@ waiting_unsuccessful() ->
     {ok, Ref} = lbm_nomq_mon:add_waiting(?TOPIC, []),
 
     Ss = [waiting_unsuccessful],
-    Write = {write, {?TABLE, ?TOPIC, Ss}, ignored},
+    Write = {write, {?BACKEND, ?TOPIC, Ss}, ignored},
     Fun = fun() -> lbm_nomq_mon ! {mnesia_table_event, Write} end,
     {P, _} = spawn_monitor(Fun),
 

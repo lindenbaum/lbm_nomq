@@ -27,7 +27,6 @@
 
 -behaviour(application).
 -behaviour(supervisor).
--behaviour(lbm_kv).
 
 %% API
 -export([subscribe_server/1,
@@ -42,15 +41,14 @@
 %% supervisor callbacks
 -export([init/1]).
 
-%% lbm_kv callbacks
--export([resolve_conflict/1]).
-
 -type topic()  :: any().
 -type mfargs() :: {module(), atom(), [term()]}.
 
 -export_type([topic/0, mfargs/0]).
 
 -include("lbm_nomq.hrl").
+
+-define(SUBSCRIBER(M, F, As), #lbm_nomq_subscr{m = M, f = F, as = As}).
 
 %%%=============================================================================
 %%% API
@@ -152,21 +150,7 @@ stop(_State) -> ok.
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-init([]) ->
-    ok = lbm_kv:create(?TABLE),
-    {ok, {{one_for_one, 0, 1}, [spec(lbm_nomq_mon, [])]}}.
-
-%%%=============================================================================
-%%% lbm_kv callbacks
-%%%=============================================================================
-
-%%------------------------------------------------------------------------------
-%% @private
-%% Basically ignore conflicting `lbm_kv' tables, since bad subscribers will be
-%% sorted out on the fly and updates will propagate new subscribers
-%% automatically.
-%%------------------------------------------------------------------------------
-resolve_conflict(_Node) -> ok.
+init([]) -> {ok, {{one_for_one, 0, 1}, [spec(lbm_nomq_mon, [])]}}.
 
 %%%=============================================================================
 %%% internal functions
@@ -180,30 +164,13 @@ spec(M, As) -> {M, {M, start_link, As}, permanent, 1000, worker, [M]}.
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-add_subscriber(Topic, S = ?SUBSCRIBER(_, _, _)) ->
-    Fun = fun([Ss]) -> [[S | Ss]]; (_) -> [[S]] end,
-    case lbm_kv:update(?TABLE, Topic, Fun) of
-        {ok, _} ->
-            ok;
-        Error ->
-            Error
-    end.
+add_subscriber(Topic, Subscriber) -> ?BACKEND:add(Topic, Subscriber).
 
 %%------------------------------------------------------------------------------
 %% @private
 %% Only dirty reads can handle 10000+ concurrent reads.
 %%------------------------------------------------------------------------------
-get_subscribers(Topic) ->
-    SsList = lbm_kv:get(?TABLE, Topic, dirty),
-    lists:append([shuffle(Ss) || Ss <- SsList, is_list(Ss)]).
-
-%%------------------------------------------------------------------------------
-%% @private
-%%------------------------------------------------------------------------------
-shuffle(L) when is_list(L) ->
-    shuffle(L, length(L)).
-shuffle(L, Len) ->
-    [E || {_, E} <- lists:sort([{crypto:rand_uniform(0, Len), E} || E <- L])].
+get_subscribers(Topic) -> ?BACKEND:get(Topic).
 
 %%------------------------------------------------------------------------------
 %% @private

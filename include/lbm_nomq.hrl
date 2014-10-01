@@ -13,11 +13,9 @@
 -ifndef(lbm_nomq_hrl_).
 -define(lbm_nomq_hrl_, 1).
 
--define(TABLE, lbm_nomq).
+-define(BACKEND, lbm_nomq_kv).
 
 -record(lbm_nomq_subscr, {m :: module(), f :: atom(), as :: [term()]}).
-
--define(SUBSCRIBER(M, F, As), #lbm_nomq_subscr{m = M, f = F, as = As}).
 
 -define(UPDATE_MSG(Ref, Topic, Ss), {lbm_nomq_mon, Ref, Topic, Ss}).
 
