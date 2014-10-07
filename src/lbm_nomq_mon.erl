@@ -9,8 +9,8 @@
 %%% @copyright (C) 2014, Lindenbaum GmbH
 %%%
 %%% @doc
-%%% A monitoring server that mirrors the persistent subscriber state. This is
-%%% done to optimise writes to the persistent background storage.
+%%% A monitoring server that mirrors the distributed subscriber state. This is
+%%% done to optimise writes to the distributed background storage.
 %%%
 %%% If a process does not find subscribers for its topic it registeres at this
 %%% server to get a notification as soon as new subscribers for its topic are
@@ -144,7 +144,7 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-terminate(_Reason, _State) -> ?BACKEND:destroy().
+terminate(_Reason, _State) -> ok.
 
 %%%=============================================================================
 %%% Internal functions
@@ -175,7 +175,7 @@ del_topic(Topic, State = #state{s = S}) ->
 %%------------------------------------------------------------------------------
 %% @private
 %% Delete subscribers detected as bad. If the process state indicates a change
-%% in subscribers, try to update the persistent backend storage.
+%% in subscribers, try to update the distributed backend storage.
 %%------------------------------------------------------------------------------
 del_subscribers(Topic, BadSs, State = #state{s = S}) ->
     Subscribers = maps:get(Topic, S, []),

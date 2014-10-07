@@ -170,7 +170,7 @@ add_subscriber(Topic, Subscriber) -> ?BACKEND:add(Topic, Subscriber).
 %% @private
 %% Only dirty reads can handle 10000+ concurrent reads.
 %%------------------------------------------------------------------------------
-get_subscribers(Topic) -> ?BACKEND:get(Topic).
+get_subscribers(Topic) -> shuffle(?BACKEND:get(Topic)).
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -245,3 +245,11 @@ cancel_timer(TimerRef, Timeout, Topic, Ref) ->
         Time when is_integer(Time) ->
             Time
     end.
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+shuffle(L) when is_list(L) ->
+    shuffle(L, length(L)).
+shuffle(L, Len) ->
+    [E || {_, E} <- lists:sort([{crypto:rand_uniform(0, Len), E} || E <- L])].

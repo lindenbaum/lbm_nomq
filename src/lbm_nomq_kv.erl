@@ -9,18 +9,18 @@
 %%% @copyright (C) 2014, Lindenbaum GmbH
 %%%
 %%% @doc
-%%% A backend for the persistent subscriber storage based on `lbm_kv' and thus
-%%% Mnesia.
+%%% An implementation of the {@link lbm_nomq_dist} behaviour based on the
+%%% `lbm_kv' application which in turn uses distributed Mnesia.
 %%% @end
 %%%=============================================================================
 
 -module(lbm_nomq_kv).
 
+-behaviour(lbm_nomq_dist).
 -behaviour(lbm_kv).
 
-%% API
+%% lbm_nomq_dist callbacks
 -export([init/0,
-         destroy/0,
          add/2,
          get/1,
          del/2,
@@ -32,14 +32,11 @@
 -include("lbm_nomq.hrl").
 
 %%%=============================================================================
-%%% API
+%%% lbm_nomq_dist callbacks
 %%%=============================================================================
 
 %%------------------------------------------------------------------------------
-%% @doc
-%% Initialize the storage backend. This must be called once, before using the
-%% functions below. It returns a mapping of all initial subscriptions.
-%% @end
+%% @private
 %%------------------------------------------------------------------------------
 -spec init() -> {ok, [{lbm_nomq:topic(), #lbm_nomq_subscr{}}]}.
 init() ->
@@ -48,20 +45,9 @@ init() ->
     {ok, lbm_kv:get_all(?MODULE)}.
 
 %%------------------------------------------------------------------------------
-%% @doc
-%% Initialize the storage backend. This must be called once, before using the
-%% functions below.
-%% @end
-%%------------------------------------------------------------------------------
--spec destroy() -> ok.
-destroy() -> lbm_kv:unsubscribe(?MODULE).
-
-%%------------------------------------------------------------------------------
-%% @doc
-%% Add a subscriber for `Topic'. Do not call this function from a massive amount
-%% of processes, since Mnesia is not good handling thousands of concurrent
-%% transactions.
-%% @end
+%% @private
+%% NOTE: Do not call this function from a massive amount of processes, since
+%% Mnesia is not good handling thousands of concurrent transactions.
 %%------------------------------------------------------------------------------
 -spec add(lbm_nomq:topic(), #lbm_nomq_subscr{}) -> ok | {error, term()}.
 add(Topic, Subscriber = #lbm_nomq_subscr{}) ->
@@ -74,22 +60,22 @@ add(Topic, Subscriber = #lbm_nomq_subscr{}) ->
     end.
 
 %%------------------------------------------------------------------------------
-%% @doc
-%% Returns a shuffled list of all current subscribers for `Topic'.
+%% @private
 %% NOTE: Only dirty reads can handle 10000+ concurrent reads.
-%% @end
 %%------------------------------------------------------------------------------
 -spec get(lbm_nomq:topic()) -> [#lbm_nomq_subscr{}].
 get(Topic) ->
-    SsList = lbm_kv:get(?MODULE, Topic, dirty),
-    lists:append([shuffle(Ss) || Ss <- SsList, is_list(Ss)]).
+    case lbm_kv:get(?MODULE, Topic, dirty) of
+        SsList when is_list(SsList) ->
+            lists:append(SsList);
+        _Error ->
+            []
+    end.
 
 %%------------------------------------------------------------------------------
-%% @doc
-%% Remove a given list of subscribers for `Topic'. Do not call this function
-%% from a massive amount of processes, since Mnesia is not good handling
-%% thousands of concurrent transactions.
-%% @end
+%% @private
+%% NOTE: Do not call this function from a massive amount of processes, since
+%% Mnesia is not good handling thousands of concurrent transactions.
 %%------------------------------------------------------------------------------
 -spec del(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) ->
                  {ok, [#lbm_nomq_subscr{}]} | {error, term()}.
@@ -107,10 +93,8 @@ del(Topic, Subscribers) ->
       end).
 
 %%------------------------------------------------------------------------------
-%% @doc
-%% Handles/translates asynchronous messages from the backend, in this case
-%% Mnesia table events.
-%% @end
+%% @private
+%% Handles/translates Mnesia table events.
 %%------------------------------------------------------------------------------
 -spec handle_info(term()) ->
                          {put, lbm_nomq:topic(), [#lbm_nomq_subscr{}]} |
@@ -135,14 +119,6 @@ resolve_conflict(_Node) -> ok.
 %%%=============================================================================
 %%% internal functions
 %%%=============================================================================
-
-%%------------------------------------------------------------------------------
-%% @private
-%%------------------------------------------------------------------------------
-shuffle(L) when is_list(L) ->
-    shuffle(L, length(L)).
-shuffle(L, Len) ->
-    [E || {_, E} <- lists:sort([{crypto:rand_uniform(0, Len), E} || E <- L])].
 
 %%------------------------------------------------------------------------------
 %% @private
