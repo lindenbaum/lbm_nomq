@@ -10,13 +10,21 @@
 %%%
 %%% @doc
 %%% Defines the behaviour for the distributed state backend used to manage
-%%% subscribers.
+%%% subscribers. This module eats its own dogfood and delegates to the
+%%% configured backend.
 %%% @end
 %%%=============================================================================
 
 -module(lbm_nomq_dist).
 
 -include("lbm_nomq.hrl").
+
+%% lbm_nomq_dist callbacks
+-export([init/0,
+         add/2,
+         get/1,
+         del/2,
+         handle_info/1]).
 
 %%%=============================================================================
 %%% Behaviour
@@ -42,3 +50,40 @@
     {delete, lbm_nomq:topic()} |
     ignore.
 %% Handles/translates asynchronous messages from the state backend.
+
+%%%=============================================================================
+%%% lbm_nomq_dist callbacks
+%%%=============================================================================
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+-spec init() -> {ok, [{lbm_nomq:topic(), #lbm_nomq_subscr{}}]}.
+init() -> ?BACKEND:init().
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+-spec add(lbm_nomq:topic(), #lbm_nomq_subscr{}) -> ok | {error, term()}.
+add(Topic, Subscriber) -> ?BACKEND:add(Topic, Subscriber).
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+-spec get(lbm_nomq:topic()) -> [#lbm_nomq_subscr{}].
+get(Topic) -> ?BACKEND:get(Topic).
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+-spec del(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) ->
+                 {ok, [#lbm_nomq_subscr{}]} | {error, term()}.
+del(Topic, Subscribers) -> ?BACKEND:del(Topic, Subscribers).
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+-spec handle_info(term()) ->
+                         {put, lbm_nomq:topic(), [#lbm_nomq_subscr{}]} |
+                         {delete, lbm_nomq:topic()} | ignore.
+handle_info(Event) -> ?BACKEND:handle_info(Event).

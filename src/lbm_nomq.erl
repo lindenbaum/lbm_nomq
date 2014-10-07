@@ -150,7 +150,8 @@ stop(_State) -> ok.
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-init([]) -> {ok, {{one_for_one, 0, 1}, [spec(lbm_nomq_mon, [])]}}.
+init([]) ->
+    {ok, {{one_for_one, 0, 1}, ?BACKEND_SPECS ++ [spec(lbm_nomq_mon, [])]}}.
 
 %%%=============================================================================
 %%% internal functions
@@ -164,13 +165,13 @@ spec(M, As) -> {M, {M, start_link, As}, permanent, 1000, worker, [M]}.
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-add_subscriber(Topic, Subscriber) -> ?BACKEND:add(Topic, Subscriber).
+add_subscriber(Topic, Subscriber) -> lbm_nomq_dist:add(Topic, Subscriber).
 
 %%------------------------------------------------------------------------------
 %% @private
 %% Only dirty reads can handle 10000+ concurrent reads.
 %%------------------------------------------------------------------------------
-get_subscribers(Topic) -> shuffle(?BACKEND:get(Topic)).
+get_subscribers(Topic) -> shuffle(lbm_nomq_dist:get(Topic)).
 
 %%------------------------------------------------------------------------------
 %% @private

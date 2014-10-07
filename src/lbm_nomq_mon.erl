@@ -105,7 +105,7 @@ del_waiting_loop(Topic, Reference) ->
 %% @private
 %%------------------------------------------------------------------------------
 init([]) ->
-    {ok, Subscriptions} = ?BACKEND:init(),
+    {ok, Subscriptions} = lbm_nomq_dist:init(),
     {ok, #state{s = maps:from_list(Subscriptions), w = maps:new()}}.
 
 %%------------------------------------------------------------------------------
@@ -130,7 +130,7 @@ handle_cast(_Request, State) ->
 %%------------------------------------------------------------------------------
 handle_info(Info, State) ->
     {noreply,
-     case ?BACKEND:handle_info(Info) of
+     case lbm_nomq_dist:handle_info(Info) of
          {put, Topic, Subscribers} -> put_topic(Topic, Subscribers, State);
          {delete, Topic}           -> del_topic(Topic, State);
          ignore                    -> State
@@ -184,7 +184,7 @@ del_subscribers(Topic, BadSs, State = #state{s = S}) ->
             %% no change, no write attempt
             State;
         _ ->
-            case ?BACKEND:del(Topic, BadSs) of
+            case lbm_nomq_dist:del(Topic, BadSs) of
                 {ok, []} ->
                     State#state{s = maps:without([Topic], S)};
                 {ok, [NewSs]} ->
