@@ -25,13 +25,7 @@
 %%%=============================================================================
 
 all_test_() ->
-    {setup,
-     fun() ->
-             {ok, _} = application:ensure_all_started(lbm_nomq)
-     end,
-     fun({ok, Apps}) ->
-             [application:stop(App) || App <- Apps]
-     end,
+    {setup, setup(), teardown(),
      [
       fun basic_subscribe/0,
       fun no_subscribers/0,
@@ -198,4 +192,21 @@ receive_loop(Terms, NumTerms) ->
             end;
         Term ->
             exit({unexpected_term, Term})
+    end.
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+setup() ->
+    fun() ->
+            {ok, Apps} = application:ensure_all_started(lbm_nomq),
+            Apps
+    end.
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+teardown() ->
+    fun(Apps) ->
+            [application:stop(App) || App <- Apps]
     end.

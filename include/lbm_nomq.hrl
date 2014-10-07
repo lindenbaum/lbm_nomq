@@ -16,8 +16,8 @@
 -define(BACKEND, lbm_nomq_kv).
 -define(BACKEND_SPECS, []).
 
-%%-define(BACKEND, lbm_nomq_ets).
-%%-define(BACKEND_SPECS, [spec(lbm_nomq_ets, [])]).
+%% -define(BACKEND, lbm_nomq_ets).
+%% -define(BACKEND_SPECS, [spec(lbm_nomq_ets, [])]).
 
 -record(lbm_nomq_subscr, {m :: module(), f :: atom(), as :: [term()]}).
 

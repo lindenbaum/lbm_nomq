@@ -24,13 +24,7 @@
 %%%=============================================================================
 
 all_test_() ->
-    {setup,
-     fun() ->
-             {ok, _} = application:ensure_all_started(lbm_nomq)
-     end,
-     fun({ok, Apps}) ->
-             [application:stop(App) || App <- Apps]
-     end,
+    {setup, setup(), teardown(),
      [
       fun waiting_gets_notified/0,
       fun waiting_unsuccessful/0
@@ -42,6 +36,7 @@ waiting_gets_notified() ->
     Ss = [waiting_gets_notified],
     Write = {write, {?BACKEND, ?TOPIC, Ss}, ignored},
     lbm_nomq_mon ! {mnesia_table_event, Write},
+    lbm_nomq_mon ! {lbm_nomq_ets, put, ?TOPIC, Ss},
 
     receive ?UPDATE_MSG(Ref, ?TOPIC, Ss) -> ok end.
 
@@ -50,7 +45,10 @@ waiting_unsuccessful() ->
 
     Ss = [waiting_unsuccessful],
     Write = {write, {?BACKEND, ?TOPIC, Ss}, ignored},
-    Fun = fun() -> lbm_nomq_mon ! {mnesia_table_event, Write} end,
+    Fun = fun() ->
+                  lbm_nomq_mon ! {mnesia_table_event, Write},
+                  lbm_nomq_mon ! {lbm_nomq_ets, put, ?TOPIC, Ss}
+          end,
     {P, _} = spawn_monitor(Fun),
 
     ok = lbm_nomq_mon:del_waiting(?TOPIC, Ref),
@@ -60,4 +58,25 @@ waiting_unsuccessful() ->
         M = ?UPDATE_MSG(Ref, ?TOPIC, Ss) -> throw({unexpected_msg, M})
     after
         0 -> ok
+    end.
+
+%%%=============================================================================
+%%% Internal functions
+%%%=============================================================================
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+setup() ->
+    fun() ->
+            {ok, Apps} = application:ensure_all_started(lbm_nomq),
+            Apps
+    end.
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+teardown() ->
+    fun(Apps) ->
+            [application:stop(App) || App <- Apps]
     end.
