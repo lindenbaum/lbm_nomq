@@ -105,8 +105,7 @@ del_waiting_loop(Topic, Reference) ->
 %% @private
 %%------------------------------------------------------------------------------
 init([]) ->
-    {ok, Subscriptions} = lbm_nomq_dist:init(),
-    {ok, #state{s = maps:from_list(Subscriptions), w = maps:new()}}.
+    {ok, #state{s = maps:from_list(lbm_nomq_dist:init()), w = maps:new()}}.
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -185,9 +184,9 @@ del_subscribers(Topic, BadSs, State = #state{s = S}) ->
             State;
         _ ->
             case lbm_nomq_dist:del(Topic, BadSs) of
-                {ok, []} ->
+                [] ->
                     State#state{s = maps:without([Topic], S)};
-                {ok, [NewSs]} ->
+                NewSs ->
                     State#state{s = maps:put(Topic, NewSs, S)}
             end
     end.

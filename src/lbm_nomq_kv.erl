@@ -38,59 +38,49 @@
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec init() -> {ok, [{lbm_nomq:topic(), #lbm_nomq_subscr{}}]}.
+-spec init() -> [{lbm_nomq:topic(), #lbm_nomq_subscr{}}].
 init() ->
     ok = lbm_kv:create(?MODULE),
     ok = lbm_kv:subscribe(?MODULE),
-    {ok, lbm_kv:get_all(?MODULE)}.
+    lbm_kv:get_all(?MODULE).
 
 %%------------------------------------------------------------------------------
 %% @private
 %% NOTE: Do not call this function from a massive amount of processes, since
 %% Mnesia is not good handling thousands of concurrent transactions.
 %%------------------------------------------------------------------------------
--spec add(lbm_nomq:topic(), #lbm_nomq_subscr{}) -> ok | {error, term()}.
+-spec add(lbm_nomq:topic(), #lbm_nomq_subscr{}) -> ok.
 add(Topic, Subscriber = #lbm_nomq_subscr{}) ->
     Fun = fun([Ss]) -> [[Subscriber | Ss]]; (_) -> [[Subscriber]] end,
-    case lbm_kv:update(?MODULE, Topic, Fun) of
-        {ok, _} ->
-            ok;
-        Error ->
-            Error
-    end.
+    {ok, _} = lbm_kv:update(?MODULE, Topic, Fun),
+    ok.
 
 %%------------------------------------------------------------------------------
 %% @private
 %% NOTE: Only dirty reads can handle 10000+ concurrent reads.
 %%------------------------------------------------------------------------------
 -spec get(lbm_nomq:topic()) -> [#lbm_nomq_subscr{}].
-get(Topic) ->
-    case lbm_kv:get(?MODULE, Topic, dirty) of
-        SsList when is_list(SsList) ->
-            lists:append(SsList);
-        _Error ->
-            []
-    end.
+get(Topic) -> lists:append(lbm_kv:get(?MODULE, Topic, dirty)).
 
 %%------------------------------------------------------------------------------
 %% @private
 %% NOTE: Do not call this function from a massive amount of processes, since
 %% Mnesia is not good handling thousands of concurrent transactions.
 %%------------------------------------------------------------------------------
--spec del(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) ->
-                 {ok, [#lbm_nomq_subscr{}]} | {error, term()}.
+-spec del(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) -> [#lbm_nomq_subscr{}].
 del(Topic, Subscribers) ->
-    lbm_kv:update(
-      ?MODULE,
-      Topic,
-      fun([]) ->
-              [];
-         ([Ss]) ->
-              case Ss -- Subscribers of
-                  []    -> [];
-                  NewSs -> [NewSs]
-              end
-      end).
+    {ok, SsList} = lbm_kv:update(
+                     ?MODULE,
+                     Topic,
+                     fun([]) ->
+                             [];
+                        ([Ss]) ->
+                             case Ss -- Subscribers of
+                                 []    -> [];
+                                 NewSs -> [NewSs]
+                             end
+                     end),
+    lists:append(SsList).
 
 %%------------------------------------------------------------------------------
 %% @private

@@ -30,19 +30,18 @@
 %%% Behaviour
 %%%=============================================================================
 
--callback init() -> {ok, [{lbm_nomq:topic(), #lbm_nomq_subscr{}}]}.
+-callback init() -> [{lbm_nomq:topic(), #lbm_nomq_subscr{}}].
 %% Initialize the state backend on this node. This will be called once, before
 %% any of the functions below are used. It should return a mapping of all
 %% initial subscriptions (if any).
 
--callback add(lbm_nomq:topic(), #lbm_nomq_subscr{}) -> ok | {error, term()}.
+-callback add(lbm_nomq:topic(), #lbm_nomq_subscr{}) -> ok.
 %% Add a subscriber for `Topic'.
 
 -callback get(lbm_nomq:topic()) -> [#lbm_nomq_subscr{}].
 %% Returns a list of all current subscribers for `Topic'.
 
--callback del(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) ->
-    {ok, [#lbm_nomq_subscr{}]} | {error, term()}.
+-callback del(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) -> [#lbm_nomq_subscr{}].
 %% Remove a given list of subscribers for `Topic'.
 
 -callback handle_info(term()) ->
@@ -58,13 +57,13 @@
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec init() -> {ok, [{lbm_nomq:topic(), #lbm_nomq_subscr{}}]}.
+-spec init() -> [{lbm_nomq:topic(), #lbm_nomq_subscr{}}].
 init() -> ?BACKEND:init().
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec add(lbm_nomq:topic(), #lbm_nomq_subscr{}) -> ok | {error, term()}.
+-spec add(lbm_nomq:topic(), #lbm_nomq_subscr{}) -> ok.
 add(Topic, Subscriber) -> ?BACKEND:add(Topic, Subscriber).
 
 %%------------------------------------------------------------------------------
@@ -76,8 +75,7 @@ get(Topic) -> ?BACKEND:get(Topic).
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec del(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) ->
-                 {ok, [#lbm_nomq_subscr{}]} | {error, term()}.
+-spec del(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) -> [#lbm_nomq_subscr{}].
 del(Topic, Subscribers) -> ?BACKEND:del(Topic, Subscribers).
 
 %%------------------------------------------------------------------------------
