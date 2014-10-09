@@ -14,12 +14,12 @@
 %%% It is based on the principle, that messages are safest when they reside in
 %%% the originator until they have been processed by a subscriber. This is
 %%% achieved by a mechanism similar to a blocking queue. The originator will be
-%%% blocked until the message has been received *and* handled by (at most) one
+%%% blocked until the message has been received *and* handled by exactly one
 %%% subscriber. Thus, this mechanism is well-suited for applications with many
 %%% concurrent producers that produce a moderate amount of messages each.
 %%%
-%%% Subscriptions are propagated and persisted using distributed, RAM-only
-%%% Mnesia tables.
+%%% In a nutshell the application provides distributed `gen:call` to one
+%%% subscriber of a group, with failover/redundancy and grouping of subscribers.
 %%% @end
 %%%=============================================================================
 
