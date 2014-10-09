@@ -20,35 +20,42 @@
 -include("lbm_nomq.hrl").
 
 %% lbm_nomq_dist callbacks
--export([init/0,
-         add/2,
-         get/1,
-         del/2,
-         handle_info/1]).
+-export([spec/1,
+         add_subscriber/2,
+         del_subscribers/2,
+         get_subscribers/1,
+         add_waiting/2,
+         del_waiting/2]).
 
 %%%=============================================================================
 %%% Behaviour
 %%%=============================================================================
 
--callback init() -> [{lbm_nomq:topic(), #lbm_nomq_subscr{}}].
-%% Initialize the state backend on this node. This will be called once, before
-%% any of the functions below are used. It should return a mapping of all
-%% initial subscriptions (if any).
+-callback spec(term()) -> supervisor:child_spec().
+%% Return the supervisor child spec that has to be used ton start the backend.
 
--callback add(lbm_nomq:topic(), #lbm_nomq_subscr{}) -> ok.
+-callback add_subscriber(lbm_nomq:topic(), #lbm_nomq_subscr{}) -> ok.
 %% Add a subscriber for `Topic'.
 
--callback get(lbm_nomq:topic()) -> [#lbm_nomq_subscr{}].
+-callback del_subscribers(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) -> ok.
+%% Report a list of bad/down subscribers for `Topic'.
+
+-callback get_subscribers(lbm_nomq:topic()) -> [#lbm_nomq_subscr{}].
 %% Returns a list of all current subscribers for `Topic'.
 
--callback del(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) -> [#lbm_nomq_subscr{}].
-%% Remove a given list of subscribers for `Topic'.
+-callback add_waiting(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) -> {ok, reference()}.
+%% Add a process to the waiting processes for subscribers of a specific topic.
+%% The process may report bad subscribers along with the registration. The
+%% process will receive a message of the form
+%% `?UPDATE_MSG(reference(), lbm_nomq:topic(), [#lbm_nomq_subscr{}])'
+%% when new subscribers are available. The reference contained in the message
+%% will be returned from this function call.
 
--callback handle_info(term()) ->
-    {put, lbm_nomq:topic(), [#lbm_nomq_subscr{}]} |
-    {delete, lbm_nomq:topic()} |
-    ignore.
-%% Handles/translates asynchronous messages from the state backend.
+-callback del_waiting(lbm_nomq:topic(), reference()) -> ok.
+%% Removes a process from the list of waiting processes for topic. Calling this
+%% function is only necessary if the process gives up waiting for subscribers.
+%% The wait entry will be removed automatically, when a subscriber update is
+%% sent from this server.
 
 %%%=============================================================================
 %%% lbm_nomq_dist callbacks
@@ -57,31 +64,35 @@
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec init() -> [{lbm_nomq:topic(), #lbm_nomq_subscr{}}].
-init() -> ?BACKEND:init().
+-spec spec(term()) -> supervisor:child_spec().
+spec(Id) -> ?BACKEND:spec(Id).
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec add(lbm_nomq:topic(), #lbm_nomq_subscr{}) -> ok.
-add(Topic, Subscriber) -> ?BACKEND:add(Topic, Subscriber).
+-spec add_subscriber(lbm_nomq:topic(), #lbm_nomq_subscr{}) -> ok.
+add_subscriber(Topic, Subscriber) -> ?BACKEND:add_subscriber(Topic, Subscriber).
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec get(lbm_nomq:topic()) -> [#lbm_nomq_subscr{}].
-get(Topic) -> ?BACKEND:get(Topic).
+-spec del_subscribers(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) -> ok.
+del_subscribers(Topic, Subscribers) -> ?BACKEND:del_subscribers(Topic, Subscribers).
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec del(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) -> [#lbm_nomq_subscr{}].
-del(Topic, Subscribers) -> ?BACKEND:del(Topic, Subscribers).
+-spec get_subscribers(lbm_nomq:topic()) -> [#lbm_nomq_subscr{}].
+get_subscribers(Topic) -> ?BACKEND:get_subscribers(Topic).
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec handle_info(term()) ->
-                         {put, lbm_nomq:topic(), [#lbm_nomq_subscr{}]} |
-                         {delete, lbm_nomq:topic()} | ignore.
-handle_info(Event) -> ?BACKEND:handle_info(Event).
+-spec add_waiting(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) -> {ok, reference()}.
+add_waiting(Topic, BadSubscribers) -> ?BACKEND:add_waiting(Topic, BadSubscribers).
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+-spec del_waiting(lbm_nomq:topic(), reference()) -> ok.
+del_waiting(Topic, Reference) -> ?BACKEND:del_waiting(Topic, Reference).

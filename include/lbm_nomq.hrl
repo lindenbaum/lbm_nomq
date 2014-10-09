@@ -13,14 +13,10 @@
 -ifndef(lbm_nomq_hrl_).
 -define(lbm_nomq_hrl_, 1).
 
--define(BACKEND, lbm_nomq_kv).
--define(BACKEND_SPECS, []).
-
-%% -define(BACKEND, lbm_nomq_ets).
-%% -define(BACKEND_SPECS, [spec(lbm_nomq_ets, [])]).
+-define(BACKEND, lbm_nomq_ets).
 
 -record(lbm_nomq_subscr, {m :: module(), f :: atom(), as :: [term()]}).
 
--define(UPDATE_MSG(Ref, Topic, Ss), {lbm_nomq_mon, Ref, Topic, Ss}).
+-define(UPDATE_MSG(Ref, Topic, Ss), {lbm_nomq, Ref, Topic, Ss}).
 
 -endif. %% lbm_nomq_hrl_

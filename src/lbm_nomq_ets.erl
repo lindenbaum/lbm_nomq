@@ -9,33 +9,38 @@
 %%% @copyright (C) 2014, Lindenbaum GmbH
 %%%
 %%% @doc
-%%% An implementation of the {@link lbm_nomq_dist} behaviour based on local
-%%% `ETS' tables using global locks to distribute subscriptions.
+%%% An implementation of the {@link lbm_nomq_dist} behaviour based on a local
+%%% `ETS' table using global locks to distribute subscriptions. This is quite
+%%% similar to how `pg2' distributes its internal state.
+%%%
 %%% The table contains the following terms:
-%%% `{{topic, Topic}, Counter}': A topic and the current subscriber counter.
-%%% `{{subscriber, Topic, Subscriber}}': The subscribers for a certain topic.
+%%% `{{topic, Topic}, Counter}': a topic and its current subscriber counter
+%%% `{{subscriber, Topic, #lbm_nomq_subscr{}}}': a subscriber
+%%% `{{waiting, Topic, {pid(), reference()}}}': a waiting pusher
 %%% @end
 %%%=============================================================================
 
 -module(lbm_nomq_ets).
 
--compile({no_auto_import, [get/1]}).
+-behaviour(gen_server).
 
 %% Internal API
 -export([start_link/0]).
 
 %% lbm_nomq_dist callbacks
--export([init/0,
-         add/2,
-         get/1,
-         del/2,
-         handle_info/1]).
+-export([spec/1,
+         add_subscriber/2,
+         del_subscribers/2,
+         get_subscribers/1,
+         add_waiting/2,
+         del_waiting/2]).
 
 %% gen_server callbacks
 -export([init/1,
-         handle_call/3,
          handle_cast/2,
+         handle_call/3,
          handle_info/2,
+         code_change/3,
          terminate/2]).
 
 -include("lbm_nomq.hrl").
@@ -58,34 +63,35 @@ start_link() -> gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec init() -> [{lbm_nomq:topic(), #lbm_nomq_subscr{}}].
-init() -> gen_server:cast(?MODULE, {events_to, self()}), [].
+-spec spec(term()) -> supervisor:child_spec().
+spec(Id) -> {Id, {?MODULE, start_link, []}, permanent, 1000, worker, [?MODULE]}.
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec add(lbm_nomq:topic(), #lbm_nomq_subscr{}) -> ok.
-add(Topic, Subscriber = #lbm_nomq_subscr{}) ->
-    multi_call(Topic, {subscribe, Topic, Subscriber}).
+-spec add_subscriber(lbm_nomq:topic(), #lbm_nomq_subscr{}) -> ok.
+add_subscriber(Topic, Subscriber = #lbm_nomq_subscr{}) ->
+    multi_call(Topic, {add, Topic, Subscriber}).
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec del(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) -> [#lbm_nomq_subscr{}].
-del(Topic, Subscribers) ->
+-spec del_subscribers(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) -> ok.
+del_subscribers(_Topic, []) ->
+    ok;
+del_subscribers(Topic, BadSs) ->
     case ets:member(?MODULE, {topic, Topic}) of
         false ->
-            [];
+            ok;
         true ->
-            multi_call(Topic, {unsubscribe, Topic, Subscribers}),
-            get(Topic)
+            multi_cast(Topic, {delete, Topic, BadSs})
     end.
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec get(lbm_nomq:topic()) -> [#lbm_nomq_subscr{}].
-get(Topic) ->
+-spec get_subscribers(lbm_nomq:topic()) -> [#lbm_nomq_subscr{}].
+get_subscribers(Topic) ->
     case ets:member(?MODULE, {topic, Topic}) of
         true ->
             subscribers(Topic);
@@ -96,18 +102,24 @@ get(Topic) ->
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec handle_info(term()) ->
-                         {put, lbm_nomq:topic(), [#lbm_nomq_subscr{}]} |
-                         {delete, lbm_nomq:topic()} | ignore.
-handle_info({?MODULE, delete, Topic})           -> {delete, Topic};
-handle_info({?MODULE, put, Topic, Subscribers}) -> {put, Topic, Subscribers};
-handle_info(_Event)                             -> ignore.
+-spec add_waiting(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) -> {ok, reference()}.
+add_waiting(Topic, BadSs) ->
+    Reference = make_ref(),
+    Request = {add_waiting, Topic, {self(), Reference}, BadSs},
+    {gen_server:cast(?MODULE, Request), Reference}.
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+-spec del_waiting(lbm_nomq:topic(), reference()) -> ok.
+del_waiting(Topic, Reference) ->
+    gen_server:cast(?MODULE, {del_waiting, Topic, {self(), Reference}}).
 
 %%%=============================================================================
 %%% gen_server callbacks
 %%%=============================================================================
 
--record(state, {receiver :: pid()}).
+-record(state, {}).
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -126,20 +138,29 @@ init([]) ->
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-handle_call({subscribe, Topic, Subscriber}, _From, State) ->
-    {reply, ok, notify(subscribe(Topic, Subscriber), State)};
-handle_call({unsubscribe, Topic, Subscribers}, _From, State) ->
-    {reply, ok, notify(unsubscribe(Topic, Subscribers), State)};
+handle_call({add, Topic, Subscriber}, _From, State) ->
+    NewSubscribers = not empty(subscribe(Topic, Subscriber)),
+    notify_on_subscribe(NewSubscribers, Topic),
+    {reply, ok, State};
+handle_call({delete, Topic, Subscribers}, _From, State) ->
+    unsubscribe(Topic, Subscribers),
+    {reply, ok, State};
 handle_call(_Request, _From, State) ->
     {reply, undef, State}.
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-handle_cast({events_to, Pid}, State) ->
-    {noreply, State#state{receiver = Pid}};
+handle_cast({add_waiting, Topic, Who, BadSs}, State) ->
+    SubscribersLeft = empty(unsubscribe(Topic, BadSs)),
+    add_waiting(SubscribersLeft, Topic, Who),
+    {noreply, State};
+handle_cast({del_waiting, Topic, Who}, State) ->
+    true = ets:delete(?MODULE, {waiting, Topic, Who}),
+    {noreply, State};
 handle_cast({merge, Subscriptions}, State) ->
-    {noreply, notify(merge(Subscriptions), State)};
+    merge_subscriptions(Subscriptions),
+    {noreply, State};
 handle_cast(_Request, State) ->
     {noreply, State}.
 
@@ -154,6 +175,11 @@ handle_info({new, ?MODULE, Node}, State) ->
     {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -184,42 +210,14 @@ subscribe(Topic, Subscriber) ->
 
 %%------------------------------------------------------------------------------
 %% @private
-%% Merge subscriptions sent over by another node. This function returns a list
-%% with uniquely sorted topics with new subscribers. Not yet existing topics
-%% will be created.
-%%------------------------------------------------------------------------------
-merge(Subscriptions) ->
-    lists:usort(
-      lists:append(
-        [subscribe(Topic, Subscriber)
-         || [Topic, Subscribers] <- Subscriptions,
-            Subscriber <- Subscribers -- subscribers(Topic)])).
-
-%%------------------------------------------------------------------------------
-%% @private
-%% Send update notifications for a list of topics to a receiver. If there are no
-%% more subscribers for a topic the update is a `delete', in all other cases,
-%% the update is a `put'.
-%%------------------------------------------------------------------------------
-notify(Topics, State = #state{receiver = Pid}) ->
-    [notify(Pid, Topic, get(Topic)) || Topic <- Topics],
-    State.
-notify(Pid, Topic, []) ->
-    catch Pid ! {?MODULE, delete, Topic};
-notify(Pid, Topic, Subscribers) ->
-    catch Pid ! {?MODULE, put, Topic, Subscribers}.
-
-%%------------------------------------------------------------------------------
-%% @private
-%% Remove one or more subscriptions and return a list of topics with removed
-%% subscribers. In this case this is either an empty topic list or a list
-%% containing `Topic'. The topic entry will be removed if no more subscribers
-%% exist.
+%% Remove one or more subscriptions and return a list of deleted topics. In this
+%% case this is either an empty topic list or a list containing `Topic'. The
+%% topic entry will be removed if no more subscribers exist.
 %%------------------------------------------------------------------------------
 unsubscribe(Topic, Subscribers) when is_list(Subscribers) ->
     lists:usort(lists:append([unsubscribe(Topic, S) || S <- Subscribers]));
 unsubscribe(Topic, Subscriber) ->
-    Deleted = delete_entry({subscriber, Topic, Subscriber}),
+    Deleted = length(delete_entry({subscriber, Topic, Subscriber})),
     case ets:member(?MODULE, {topic, Topic}) of
         true when Deleted > 0 ->
             Decr = Deleted * -1,
@@ -228,7 +226,7 @@ unsubscribe(Topic, Subscriber) ->
                     true = ets:delete(?MODULE, {topic, Topic}),
                     [Topic];
                 _ ->
-                    [Topic]
+                    []
             end;
         _ ->
             []
@@ -236,9 +234,58 @@ unsubscribe(Topic, Subscriber) ->
 
 %%------------------------------------------------------------------------------
 %% @private
-%% Return all current subscriptions.
+%% Adds a process to the processes waiting for subscribers of a certain topic.
+%% If valid subscribers for the topic are still available, the process will not
+%% be added and notified instead.
 %%------------------------------------------------------------------------------
-all_subscribers() -> [[T, subscribers(T)] || T <- all_topics()].
+add_waiting(true, Topic, Who) ->
+    case subscribers(Topic) of
+        [] ->
+            add_waiting(false, Topic, Who);
+        Subscribers ->
+            %% still subscribers available, notify immediatelly
+            notify([Who], Topic, Subscribers)
+    end;
+add_waiting(false, Topic, Who) ->
+    %% no subscribers, need to wait for new subscriptions
+    ets:insert_new(?MODULE, {{waiting, Topic, Who}}).
+
+%%------------------------------------------------------------------------------
+%% @private
+%% Notify waiting processes, if new subscriptions available
+%%------------------------------------------------------------------------------
+notify_on_subscribe(false, _Topic) ->
+    ok;
+notify_on_subscribe(true, Topic) ->
+    notify_waiting(waiting(Topic), Topic).
+
+%%------------------------------------------------------------------------------
+%% @private
+%% Notify waiting processes, if any.
+%%------------------------------------------------------------------------------
+notify_waiting([], _Topic) ->
+    ok;
+notify_waiting(Waiting, Topic) ->
+    case subscribers(Topic) of
+        [] ->
+            ok;
+        Subscribers ->
+            true = ets:match_delete(?MODULE, {{waiting, Topic, '_'}}),
+            notify(Waiting, Topic, Subscribers)
+    end.
+
+%%------------------------------------------------------------------------------
+%% @private
+%% Notify waiting processes, by ordinary message.
+%%------------------------------------------------------------------------------
+notify(Whos, Topic, Subscribers) ->
+    [Pid ! ?UPDATE_MSG(Ref, Topic, Subscribers) || {Pid, Ref} <- Whos].
+
+%%------------------------------------------------------------------------------
+%% @private
+%% Return all currently waiting processes for a topic.
+%%------------------------------------------------------------------------------
+waiting(Topic) -> [W || [W] <- ets:match(?MODULE, {{waiting, Topic, '$1'}})].
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -249,9 +296,29 @@ subscribers(Topic) ->
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Return all current subscriptions.
+%%------------------------------------------------------------------------------
+all_subscribers() -> [[T, subscribers(T)] || T <- all_topics()].
+
+%%------------------------------------------------------------------------------
+%% @private
 %% Return all currently known topics.
 %%------------------------------------------------------------------------------
 all_topics() -> [T || [T] <- ets:match(?MODULE, {{topic, '$1'}, '_'})].
+
+%%------------------------------------------------------------------------------
+%% @private
+%% Merge subscriptions sent over by another node. Not yet existing topics will
+%% be created. This function also notifies all waiting processes if a topic gets
+%% new subscribers through the merge.
+%%------------------------------------------------------------------------------
+merge_subscriptions(Subscriptions) ->
+    [notify_on_subscribe(true, Topic)
+     || Topic <- lists:usort(
+                   lists:append(
+                     [subscribe(Topic, Subscriber)
+                      || [Topic, Subscribers] <- Subscriptions,
+                         Subscriber <- Subscribers -- subscribers(Topic)]))].
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -263,11 +330,10 @@ ensure_entry(Key, Initial) ->
 
 %%------------------------------------------------------------------------------
 %% @private
-%% Deletes all entries with a certain key and returns the number of elements
-%% removed.
+%% Deletes all entries with a certain key and returns the elements removed.
 %%------------------------------------------------------------------------------
 delete_entry(Key) ->
-    Entries = length(ets:lookup(?MODULE, Key)),
+    Entries = ets:lookup(?MODULE, Key),
     true = ets:delete(?MODULE, Key),
     Entries.
 
@@ -278,3 +344,16 @@ multi_call(Topic, Message) ->
     Fun = fun() -> gen_server:multi_call(?MODULE, Message) end,
     global:trans({{?MODULE, Topic}, self()}, Fun),
     ok.
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+multi_cast(Topic, Message) ->
+    spawn(fun() -> multi_call(Topic, Message) end),
+    ok.
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+empty([]) -> true;
+empty(_)  -> false.

@@ -150,8 +150,7 @@ stop(_State) -> ok.
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-init([]) ->
-    {ok, {{one_for_one, 0, 1}, ?BACKEND_SPECS ++ [spec(lbm_nomq_mon, [])]}}.
+init([]) -> {ok, {{one_for_one, 0, 1}, [lbm_nomq_dist:spec(backend)]}}.
 
 %%%=============================================================================
 %%% internal functions
@@ -160,18 +159,13 @@ init([]) ->
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-spec(M, As) -> {M, {M, start_link, As}, permanent, 1000, worker, [M]}.
+add_subscriber(Topic, Subscriber) ->
+    lbm_nomq_dist:add_subscriber(Topic, Subscriber).
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-add_subscriber(Topic, Subscriber) -> lbm_nomq_dist:add(Topic, Subscriber).
-
-%%------------------------------------------------------------------------------
-%% @private
-%% Only dirty reads can handle 10000+ concurrent reads.
-%%------------------------------------------------------------------------------
-get_subscribers(Topic) -> shuffle(lbm_nomq_dist:get(Topic)).
+get_subscribers(Topic) -> shuffle(lbm_nomq_dist:get_subscribers(Topic)).
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -180,7 +174,7 @@ get_subscribers(Topic) -> shuffle(lbm_nomq_dist:get(Topic)).
 %% subscribers register and handle the message or the given timeout expires.
 %%------------------------------------------------------------------------------
 push_loop([], BadSs, Topic, Msg, Timeout) ->
-    {ok, PushRef} = lbm_nomq_mon:add_waiting(Topic, BadSs),
+    {ok, PushRef} = lbm_nomq_dist:add_waiting(Topic, BadSs),
     case wait(Topic, PushRef, Timeout, send_after(Timeout, Topic, PushRef)) of
         {ok, {Subscribers, Time}} ->
             push_loop(Subscribers, [], Topic, Msg, Time);
@@ -190,7 +184,7 @@ push_loop([], BadSs, Topic, Msg, Timeout) ->
 push_loop([S = ?SUBSCRIBER(M, F, As) | Ss], BadSs, Topic, Msg, Timeout) ->
     try erlang:apply(M, F, As ++ [Msg]) of
         Result ->
-            ok = lbm_nomq_mon:del_subscribers(Topic, BadSs),
+            ok = lbm_nomq_dist:del_subscribers(Topic, BadSs),
             Result
     catch
         exit:{timeout, _} ->
@@ -206,18 +200,31 @@ push_loop([S = ?SUBSCRIBER(M, F, As) | Ss], BadSs, Topic, Msg, Timeout) ->
 %%------------------------------------------------------------------------------
 %% @private
 %% Wait for either a timeout message (created with {@link send_after/3}) or a
-%% subscriber update from {@link lbm_nomq_mon}. This will also try to leave the
+%% subscriber update from {@link lbm_nomq_dist}. This will also try to leave the
 %% callers message queue in a consistent state avoiding ghost messages beeing
 %% send to the calling process.
 %%------------------------------------------------------------------------------
 wait(Topic, PushRef, Timeout, TimerRef) ->
     receive
         ?UPDATE_MSG(PushRef, Topic, timeout) ->
-            lbm_nomq_mon:del_waiting(Topic, PushRef),
+            ok = lbm_nomq_dist:del_waiting(Topic, PushRef),
+            ok = flush_updates(Topic, PushRef),
             {error, timeout};
         ?UPDATE_MSG(PushRef, Topic, Subscribers) ->
             Time = cancel_timer(TimerRef, Timeout, Topic, PushRef),
             {ok, {Subscribers, Time}}
+    end.
+
+%%------------------------------------------------------------------------------
+%% @private
+%% Flush all pending update messages from the callers message queue.
+%%------------------------------------------------------------------------------
+flush_updates(Topic, PushRef) ->
+    receive
+        ?UPDATE_MSG(PushRef, Topic, _) ->
+            flush_updates(Topic, PushRef)
+    after
+        50 -> ok
     end.
 
 %%------------------------------------------------------------------------------
