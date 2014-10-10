@@ -14,7 +14,7 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--export([call/2]).
+-export([call/3]).
 
 -define(TOPIC, topic).
 
@@ -198,7 +198,7 @@ subscriber(Topic, NumTerms) ->
 %% @private
 %% poor man's gen_server:call/2, meant to work with receive_loop/1
 %%------------------------------------------------------------------------------
-call(Pid, Term) ->
+call(Pid, Term, Timeout) ->
     Ref = erlang:monitor(process, Pid),
     Pid ! ?MESSAGE({Ref, self(), Term}),
     receive
@@ -207,6 +207,8 @@ call(Pid, Term) ->
             ok;
         {'DOWN', Ref, process, Pid, _} ->
             exit({error, no_receiver})
+    after Timeout ->
+            exit({error, timeout})
     end.
 
 %%------------------------------------------------------------------------------

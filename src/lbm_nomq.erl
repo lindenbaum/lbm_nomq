@@ -77,9 +77,10 @@ subscribe_fsm(Topic) -> subscribe(Topic, {gen_fsm, sync_send_event, [self()]}).
 %%------------------------------------------------------------------------------
 %% @doc
 %% Subscribes `MFA' as listener for a certain topic. Messages will be delivered
-%% to the process using `erlang:appy(M, F, As ++ Message)'. The function must
-%% adhere to the `gen:call/4' protocol. This means that if the function returns
-%% without exiting, the message is considered to be consumed successfully.
+%% to the process using `erlang:appy(M, F, As ++ [Message, Timeout])'. The
+%% function must adhere to the `gen:call/4' protocol. This means that if the
+%% function returns without exiting, the message is considered to be consumed
+%% successfully.
 %%
 %% It is possible to have multiple subscribers for a topic. However, a message
 %% will be pushed to at most one subscriber. The subscriber for a message will
@@ -94,7 +95,7 @@ subscribe_fsm(Topic) -> subscribe(Topic, {gen_fsm, sync_send_event, [self()]}).
 subscribe(Topic, {M, F, As}) when is_list(As) ->
     case code:ensure_loaded(M) of
         {module, M} ->
-            case erlang:function_exported(M, F, length(As) + 1) of
+            case erlang:function_exported(M, F, length(As) + 2) of
                 true ->
                     add_subscriber(Topic, ?SUBSCRIBER(M, F, As));
                 false when M =:= erlang ->
@@ -108,24 +109,29 @@ subscribe(Topic, {M, F, As}) when is_list(As) ->
 
 %%------------------------------------------------------------------------------
 %% @doc
-%% Similar to {@link push/3} with `Timeout' set to `infinity'.
+%% Similar to {@link push/3} with `Timeout' set to `5000'.
 %% @end
 %%------------------------------------------------------------------------------
 -spec push(topic(), term()) -> any().
-push(Topic, Message) -> push(Topic, Message, infinity).
+push(Topic, Message) -> push(Topic, Message, 5000).
 
 %%------------------------------------------------------------------------------
 %% @doc
 %% Send a message for a specific topic. This will block the calling process
-%% until the message has successfully consumed by exactly one subscriber. If
-%% there are no subscribers available for `Topic' the process will wait for
-%% subscribers up to `Timeout' millis.
+%% until either the message has been successfully consumed by exactly one
+%% subscriber or the `Timeout' millis elapsed. If there are no subscribers
+%% available for `Topic' the process will wait for new subscribers (until
+%% `Timeout' expires).
 %%
 %% If a push finally fails, the caller will be exited with
-%% `exit({timeout, {lbm_nomq, push, [Topic, Msg, Timeout]}})'.
+%% `exit({timeout, {lbm_nomq, push, [Topic, Msg, Timeout]}})'. If the calling
+%% process decides to catch this error and a subscriber is just late with the
+%% reply, it may arrive at any time later into the caller's message queue. The
+%% caller must in this case be prepared for this and discard any such garbage
+%% messages.
 %% @end
 %%------------------------------------------------------------------------------
--spec push(topic(), term(), integer() | infinity) -> any().
+-spec push(topic(), term(), non_neg_integer() | infinity) -> any().
 push(Topic, Message, Timeout) ->
     push_loop(get_subscribers(Topic), [], Topic, Message, Timeout).
 
@@ -182,14 +188,14 @@ push_loop([], BadSs, Topic, Msg, Timeout) ->
             exit({timeout, {?MODULE, push, [Topic, Msg, Timeout]}})
     end;
 push_loop([S = ?SUBSCRIBER(M, F, As) | Ss], BadSs, Topic, Msg, Timeout) ->
-    try erlang:apply(M, F, As ++ [Msg]) of
+    try erlang:apply(M, F, As ++ [Msg, Timeout]) of
         Result ->
             ok = lbm_nomq_dist:del_subscribers(Topic, BadSs),
             Result
     catch
         exit:{timeout, _} ->
-            %% subscriber is not dead, only overloaded
-            push_loop(Ss, BadSs, Topic, Msg, Timeout);
+            %% subscriber is not dead, only overloaded... anyway Timeout is over
+            exit({timeout, {?MODULE, push, [Topic, Msg, Timeout]}});
         exit:_  ->
             push_loop(Ss, [S | BadSs], Topic, Msg, Timeout);
         error:badarg when M =:= gen_fsm, is_atom(hd(As)) ->
