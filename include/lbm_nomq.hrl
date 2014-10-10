@@ -13,7 +13,9 @@
 -ifndef(lbm_nomq_hrl_).
 -define(lbm_nomq_hrl_, 1).
 
--define(BACKEND, lbm_nomq_ets).
+%%-define(BACKEND, lbm_nomq_ets).
+-define(BACKEND, lbm_nomq_kv).
+-define(BACKEND_NAME, lbm_nomq_dist).
 
 -record(lbm_nomq_subscr, {m :: module(), f :: atom(), as :: [term()]}).
 

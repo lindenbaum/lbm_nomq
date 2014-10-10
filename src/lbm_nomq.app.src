@@ -4,8 +4,7 @@
   {vsn, "0.0.1"},
   {registered,
    [
-    lbm_nomq_ets,
-    lbm_nomq_mon
+    lbm_nomq_dist
    ]},
   {applications,
    [

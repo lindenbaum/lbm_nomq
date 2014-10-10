@@ -13,7 +13,7 @@
 %%% `ETS' table using global locks to distribute subscriptions. This is quite
 %%% similar to how `pg2' distributes its internal state.
 %%%
-%%% The table contains the following terms:
+%%% The table ?MODULE contains the following terms:
 %%% `{{topic, Topic}, Counter}': a topic and its current subscriber counter
 %%% `{{subscriber, Topic, #lbm_nomq_subscr{}}}': a subscriber
 %%% `{{waiting, Topic, {pid(), reference()}}}': a waiting pusher
@@ -23,6 +23,7 @@
 -module(lbm_nomq_ets).
 
 -behaviour(gen_server).
+-behaviour(lbm_nomq_dist).
 
 %% Internal API
 -export([start_link/0]).
@@ -54,7 +55,7 @@
 %% Simply start the server (registered).
 %%------------------------------------------------------------------------------
 -spec start_link() -> {ok, pid()} | {error, term()}.
-start_link() -> gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+start_link() -> gen_server:start_link({local, ?BACKEND_NAME}, ?MODULE, [], []).
 
 %%%=============================================================================
 %%% lbm_nomq_dist callbacks
@@ -106,14 +107,14 @@ get_subscribers(Topic) ->
 add_waiting(Topic, BadSs) ->
     Reference = make_ref(),
     Request = {add_waiting, Topic, {self(), Reference}, BadSs},
-    {gen_server:cast(?MODULE, Request), Reference}.
+    {gen_server:cast(?BACKEND_NAME, Request), Reference}.
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
 -spec del_waiting(lbm_nomq:topic(), reference()) -> ok.
 del_waiting(Topic, Reference) ->
-    gen_server:cast(?MODULE, {del_waiting, Topic, {self(), Reference}}).
+    gen_server:cast(?BACKEND_NAME, {del_waiting, Topic, {self(), Reference}}).
 
 %%%=============================================================================
 %%% gen_server callbacks
@@ -129,7 +130,7 @@ init([]) ->
     ok = net_kernel:monitor_nodes(true),
     lists:foreach(
       fun(Node) ->
-              {?MODULE, Node} ! {new, ?MODULE, node()},
+              {?BACKEND_NAME, Node} ! {new, ?MODULE, node()},
               self() ! {nodeup, Node}
       end, Nodes),
     ?MODULE = ets:new(?MODULE, [ordered_set, protected, named_table]),
@@ -168,10 +169,10 @@ handle_cast(_Request, State) ->
 %% @private
 %%------------------------------------------------------------------------------
 handle_info({nodeup, Node}, State) ->
-    gen_server:cast({?MODULE, Node}, {merge, all_subscribers()}),
+    gen_server:cast({?BACKEND_NAME, Node}, {merge, all_subscribers()}),
     {noreply, State};
 handle_info({new, ?MODULE, Node}, State) ->
-    gen_server:cast({?MODULE, Node}, {merge, all_subscribers()}),
+    gen_server:cast({?BACKEND_NAME, Node}, {merge, all_subscribers()}),
     {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -217,7 +218,7 @@ subscribe(Topic, Subscriber) ->
 unsubscribe(Topic, Subscribers) when is_list(Subscribers) ->
     lists:usort(lists:append([unsubscribe(Topic, S) || S <- Subscribers]));
 unsubscribe(Topic, Subscriber) ->
-    Deleted = length(delete_entry({subscriber, Topic, Subscriber})),
+    Deleted = delete_subscriber(Topic, Subscriber),
     case ets:member(?MODULE, {topic, Topic}) of
         true when Deleted > 0 ->
             Decr = Deleted * -1,
@@ -257,7 +258,7 @@ add_waiting(false, Topic, Who) ->
 notify_on_subscribe(false, _Topic) ->
     ok;
 notify_on_subscribe(true, Topic) ->
-    notify_waiting(waiting(Topic), Topic).
+    notify_waiting(subscribers(Topic), Topic).
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -265,11 +266,11 @@ notify_on_subscribe(true, Topic) ->
 %%------------------------------------------------------------------------------
 notify_waiting([], _Topic) ->
     ok;
-notify_waiting(Waiting, Topic) ->
-    case subscribers(Topic) of
+notify_waiting(Subscribers, Topic) ->
+    case waiting(Topic) of
         [] ->
             ok;
-        Subscribers ->
+        Waiting ->
             true = ets:match_delete(?MODULE, {{waiting, Topic, '_'}}),
             notify(Waiting, Topic, Subscribers)
     end.
@@ -293,6 +294,15 @@ waiting(Topic) -> [W || [W] <- ets:match(?MODULE, {{waiting, Topic, '$1'}})].
 %%------------------------------------------------------------------------------
 subscribers(Topic) ->
     [S || [S] <- ets:match(?MODULE, {{subscriber, Topic, '$1'}})].
+
+%%------------------------------------------------------------------------------
+%% @private
+%% Deletes all entries with a certain key and returns the number if elements
+%% removed.
+%%------------------------------------------------------------------------------
+delete_subscriber(Topic, Subscriber) ->
+    Key = {subscriber, Topic, Subscriber},
+    ets:select_delete(?MODULE, [{{Key}, [], [true]}]).
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -330,18 +340,9 @@ ensure_entry(Key, Initial) ->
 
 %%------------------------------------------------------------------------------
 %% @private
-%% Deletes all entries with a certain key and returns the elements removed.
-%%------------------------------------------------------------------------------
-delete_entry(Key) ->
-    Entries = ets:lookup(?MODULE, Key),
-    true = ets:delete(?MODULE, Key),
-    Entries.
-
-%%------------------------------------------------------------------------------
-%% @private
 %%------------------------------------------------------------------------------
 multi_call(Topic, Message) ->
-    Fun = fun() -> gen_server:multi_call(?MODULE, Message) end,
+    Fun = fun() -> gen_server:multi_call(?BACKEND_NAME, Message) end,
     global:trans({{?MODULE, Topic}, self()}, Fun),
     ok.
 
