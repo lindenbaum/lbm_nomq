@@ -31,6 +31,7 @@ all_test_() ->
      [
       fun basic_subscribe/0,
       fun no_subscribers/0,
+      fun no_subscribers_no_wait/0,
       fun basic_push/0,
       fun multiple_subscribers/0,
       fun late_subscribe/0,
@@ -49,6 +50,13 @@ no_subscribers() ->
         _ -> throw(test_failed)
     catch
         exit:{timeout, {lbm_nomq, push, [?TOPIC, msg, 100]}} -> ok
+    end.
+
+no_subscribers_no_wait() ->
+    try lbm_nomq:push(?TOPIC, msg, 100, [no_wait]) of
+        _ -> throw(test_failed)
+    catch
+        exit:{no_subscribers, {lbm_nomq, push, [?TOPIC, msg, 100]}} -> ok
     end.
 
 basic_push() ->

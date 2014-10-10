@@ -33,7 +33,8 @@
          subscribe_fsm/1,
          subscribe/2,
          push/2,
-         push/3]).
+         push/3,
+         push/4]).
 
 %% Application callbacks
 -export([start/2, stop/1]).
@@ -117,6 +118,14 @@ push(Topic, Message) -> push(Topic, Message, 5000).
 
 %%------------------------------------------------------------------------------
 %% @doc
+%% Similar to {@link push/4} with `Options' set to `[]'.
+%% @end
+%%------------------------------------------------------------------------------
+-spec push(topic(), term(), non_neg_integer() | infinity) -> any().
+push(Topic, Message, Timeout) -> push(Topic, Message, Timeout, []).
+
+%%------------------------------------------------------------------------------
+%% @doc
 %% Send a message for a specific topic. This will block the calling process
 %% until either the message has been successfully consumed by exactly one
 %% subscriber or the `Timeout' millis elapsed. If there are no subscribers
@@ -129,11 +138,16 @@ push(Topic, Message) -> push(Topic, Message, 5000).
 %% reply, it may arrive at any time later into the caller's message queue. The
 %% caller must in this case be prepared for this and discard any such garbage
 %% messages.
+%%
+%% The only option currently supported, is the `no_wait' option. If this flag
+%% is given, the caller will not wait for subscribers (e.g. only bad or no
+%% subscribers for `Topic' could be found) and will be exited immediately with
+%% `exit({no_subscribers, {lbm_nomq, push, [Topic, Msg, Timeout]}})' instead.
 %% @end
 %%------------------------------------------------------------------------------
--spec push(topic(), term(), non_neg_integer() | infinity) -> any().
-push(Topic, Message, Timeout) ->
-    push_loop(get_subscribers(Topic), [], Topic, Message, Timeout).
+-spec push(topic(), term(), non_neg_integer() | infinity, [no_wait]) -> any().
+push(Topic, Message, Timeout, Options) ->
+    push_loop(get_subscribers(Topic), [], Topic, Message, Timeout, Options).
 
 %%%=============================================================================
 %%% Application callbacks
@@ -179,15 +193,17 @@ get_subscribers(Topic) -> shuffle(lbm_nomq_dist:get_subscribers(Topic)).
 %% subscribers can be found, the loop will block the caller until either new
 %% subscribers register and handle the message or the given timeout expires.
 %%------------------------------------------------------------------------------
-push_loop([], BadSs, Topic, Msg, Timeout) ->
+push_loop([], _BadSs, Topic, Msg, Timeout, [no_wait]) ->
+    exit({no_subscribers, {?MODULE, push, [Topic, Msg, Timeout]}});
+push_loop([], BadSs, Topic, Msg, Timeout, Opts) ->
     {ok, PushRef} = lbm_nomq_dist:add_waiting(Topic, BadSs),
     case wait(Topic, PushRef, Timeout, send_after(Timeout, Topic, PushRef)) of
         {ok, {Subscribers, Time}} ->
-            push_loop(Subscribers, [], Topic, Msg, Time);
+            push_loop(Subscribers, [], Topic, Msg, Time, Opts);
         {error, timeout} ->
             exit({timeout, {?MODULE, push, [Topic, Msg, Timeout]}})
     end;
-push_loop([S = ?SUBSCRIBER(M, F, As) | Ss], BadSs, Topic, Msg, Timeout) ->
+push_loop([S = ?SUBSCRIBER(M, F, As) | Ss], BadSs, Topic, Msg, Timeout, Opts) ->
     try erlang:apply(M, F, As ++ [Msg, Timeout]) of
         Result ->
             ok = lbm_nomq_dist:del_subscribers(Topic, BadSs),
@@ -197,10 +213,10 @@ push_loop([S = ?SUBSCRIBER(M, F, As) | Ss], BadSs, Topic, Msg, Timeout) ->
             %% subscriber is not dead, only overloaded... anyway Timeout is over
             exit({timeout, {?MODULE, push, [Topic, Msg, Timeout]}});
         exit:_  ->
-            push_loop(Ss, [S | BadSs], Topic, Msg, Timeout);
+            push_loop(Ss, [S | BadSs], Topic, Msg, Timeout, Opts);
         error:badarg when M =:= gen_fsm, is_atom(hd(As)) ->
             %% for gen_fsm, when sending to invalid (local) registered name
-            push_loop(Ss, [S | BadSs], Topic, Msg, Timeout)
+            push_loop(Ss, [S | BadSs], Topic, Msg, Timeout, Opts)
     end.
 
 %%------------------------------------------------------------------------------
