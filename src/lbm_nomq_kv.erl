@@ -25,15 +25,15 @@
 -behaviour(lbm_kv).
 
 %% Internal API
--export([start_link/0]).
+-export([start_link/1]).
 
 %% lbm_nomq_dist callbacks
 -export([spec/1,
-         add_subscriber/2,
-         del_subscribers/2,
-         get_subscribers/1,
-         add_waiting/2,
-         del_waiting/2]).
+         add_subscriber/3,
+         del_subscribers/3,
+         get_subscribers/2,
+         add_waiting/3,
+         del_waiting/3]).
 
 %% lbm_kv callbacks
 -export([resolve_conflict/1]).
@@ -60,8 +60,8 @@
 %% @private
 %% Simply start the server (registered).
 %%------------------------------------------------------------------------------
--spec start_link() -> {ok, pid()} | {error, term()}.
-start_link() -> gen_server:start_link({local, ?BACKEND_NAME}, ?MODULE, [], []).
+-spec start_link(atom()) -> {ok, pid()} | {error, term()}.
+start_link(Name) -> gen_server:start_link({local, Name}, ?MODULE, [], []).
 
 %%%=============================================================================
 %%% lbm_nomq_dist callbacks
@@ -70,16 +70,17 @@ start_link() -> gen_server:start_link({local, ?BACKEND_NAME}, ?MODULE, [], []).
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec spec(term()) -> supervisor:child_spec().
-spec(Id) -> {Id, {?MODULE, start_link, []}, permanent, 1000, worker, [?MODULE]}.
+-spec spec(atom()) -> supervisor:child_spec().
+spec(Name) ->
+    {Name, {?MODULE, start_link, [Name]}, permanent, 1000, worker, [?MODULE]}.
 
 %%------------------------------------------------------------------------------
 %% @private
 %% NOTE: Do not call this function from a massive amount of processes, since
 %% Mnesia is not good handling thousands of concurrent transactions.
 %%------------------------------------------------------------------------------
--spec add_subscriber(lbm_nomq:topic(), #lbm_nomq_subscr{}) -> ok.
-add_subscriber(Topic, Subscriber = #lbm_nomq_subscr{}) ->
+-spec add_subscriber(atom(), lbm_nomq:topic(), #lbm_nomq_subscr{}) -> ok.
+add_subscriber(_Name, Topic, Subscriber = #lbm_nomq_subscr{}) ->
     KeyAndValue = ?SUBSCR(Topic, Subscriber),
     true = is_list(lbm_kv:put(?MODULE, KeyAndValue, KeyAndValue)),
     ok.
@@ -87,35 +88,36 @@ add_subscriber(Topic, Subscriber = #lbm_nomq_subscr{}) ->
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec del_subscribers(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) -> ok.
-del_subscribers(_Topic, []) ->
+-spec del_subscribers(atom(), lbm_nomq:topic(), [#lbm_nomq_subscr{}]) -> ok.
+del_subscribers(_Name, _Topic, []) ->
     ok;
-del_subscribers(Topic, BadSs) ->
-    gen_server:cast(?BACKEND_NAME, {del_subscribers, Topic, BadSs}).
+del_subscribers(Name, Topic, BadSs) ->
+    gen_server:cast(Name, {del_subscribers, Topic, BadSs}).
 
 %%------------------------------------------------------------------------------
 %% @private
 %% NOTE: Only dirty reads can handle 10000+ concurrent reads.
 %%------------------------------------------------------------------------------
--spec get_subscribers(lbm_nomq:topic()) -> [#lbm_nomq_subscr{}].
-get_subscribers(Topic) ->
+-spec get_subscribers(atom(), lbm_nomq:topic()) -> [#lbm_nomq_subscr{}].
+get_subscribers(_Name, Topic) ->
     [S || {?SUBSCR(_, S), _} <- lbm_kv:get(?MODULE, ?SUBSCR(Topic, '_'), dirty)].
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec add_waiting(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) -> {ok, reference()}.
-add_waiting(Topic, BadSs) ->
+-spec add_waiting(atom(), lbm_nomq:topic(), [#lbm_nomq_subscr{}]) ->
+                         {ok, reference()}.
+add_waiting(Name, Topic, BadSs) ->
     Reference = make_ref(),
     Request = {add_waiting, Topic, {self(), Reference}, BadSs},
-    {gen_server:cast(?BACKEND_NAME, Request), Reference}.
+    {gen_server:cast(Name, Request), Reference}.
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec del_waiting(lbm_nomq:topic(), reference()) -> ok.
-del_waiting(Topic, Reference) ->
-    gen_server:cast(?BACKEND_NAME, {del_waiting, Topic, {self(), Reference}}).
+-spec del_waiting(atom(), lbm_nomq:topic(), reference()) -> ok.
+del_waiting(Name, Topic, Reference) ->
+    gen_server:cast(Name, {del_waiting, Topic, {self(), Reference}}).
 
 %%%=============================================================================
 %%% lbm_kv callbacks

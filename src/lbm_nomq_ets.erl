@@ -26,15 +26,15 @@
 -behaviour(lbm_nomq_dist).
 
 %% Internal API
--export([start_link/0]).
+-export([start_link/1]).
 
 %% lbm_nomq_dist callbacks
 -export([spec/1,
-         add_subscriber/2,
-         del_subscribers/2,
-         get_subscribers/1,
-         add_waiting/2,
-         del_waiting/2]).
+         add_subscriber/3,
+         del_subscribers/3,
+         get_subscribers/2,
+         add_waiting/3,
+         del_waiting/3]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -54,8 +54,8 @@
 %% @private
 %% Simply start the server (registered).
 %%------------------------------------------------------------------------------
--spec start_link() -> {ok, pid()} | {error, term()}.
-start_link() -> gen_server:start_link({local, ?BACKEND_NAME}, ?MODULE, [], []).
+-spec start_link(atom()) -> {ok, pid()} | {error, term()}.
+start_link(Name) -> gen_server:start_link({local, Name}, ?MODULE, [Name], []).
 
 %%%=============================================================================
 %%% lbm_nomq_dist callbacks
@@ -64,35 +64,36 @@ start_link() -> gen_server:start_link({local, ?BACKEND_NAME}, ?MODULE, [], []).
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec spec(term()) -> supervisor:child_spec().
-spec(Id) -> {Id, {?MODULE, start_link, []}, permanent, 1000, worker, [?MODULE]}.
+-spec spec(atom()) -> supervisor:child_spec().
+spec(Name) ->
+    {Name, {?MODULE, start_link, [Name]}, permanent, 1000, worker, [?MODULE]}.
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec add_subscriber(lbm_nomq:topic(), #lbm_nomq_subscr{}) -> ok.
-add_subscriber(Topic, Subscriber = #lbm_nomq_subscr{}) ->
-    multi_call(Topic, {add, Topic, Subscriber}).
+-spec add_subscriber(atom(), lbm_nomq:topic(), #lbm_nomq_subscr{}) -> ok.
+add_subscriber(Name, Topic, Subscriber = #lbm_nomq_subscr{}) ->
+    multi_call(Name, Topic, {add, Topic, Subscriber}).
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec del_subscribers(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) -> ok.
-del_subscribers(_Topic, []) ->
+-spec del_subscribers(atom(), lbm_nomq:topic(), [#lbm_nomq_subscr{}]) -> ok.
+del_subscribers(_Name, _Topic, []) ->
     ok;
-del_subscribers(Topic, BadSs) ->
+del_subscribers(Name, Topic, BadSs) ->
     case ets:member(?MODULE, {topic, Topic}) of
         false ->
             ok;
         true ->
-            multi_cast(Topic, {delete, Topic, BadSs})
+            multi_cast(Name, Topic, {delete, Topic, BadSs})
     end.
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec get_subscribers(lbm_nomq:topic()) -> [#lbm_nomq_subscr{}].
-get_subscribers(Topic) ->
+-spec get_subscribers(atom(), lbm_nomq:topic()) -> [#lbm_nomq_subscr{}].
+get_subscribers(_Name, Topic) ->
     case ets:member(?MODULE, {topic, Topic}) of
         true ->
             subscribers(Topic);
@@ -103,38 +104,39 @@ get_subscribers(Topic) ->
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec add_waiting(lbm_nomq:topic(), [#lbm_nomq_subscr{}]) -> {ok, reference()}.
-add_waiting(Topic, BadSs) ->
+-spec add_waiting(atom(), lbm_nomq:topic(), [#lbm_nomq_subscr{}]) ->
+                         {ok, reference()}.
+add_waiting(Name, Topic, BadSs) ->
     Reference = make_ref(),
     Request = {add_waiting, Topic, {self(), Reference}, BadSs},
-    {gen_server:cast(?BACKEND_NAME, Request), Reference}.
+    {gen_server:cast(Name, Request), Reference}.
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
--spec del_waiting(lbm_nomq:topic(), reference()) -> ok.
-del_waiting(Topic, Reference) ->
-    gen_server:cast(?BACKEND_NAME, {del_waiting, Topic, {self(), Reference}}).
+-spec del_waiting(atom(), lbm_nomq:topic(), reference()) -> ok.
+del_waiting(Name, Topic, Reference) ->
+    gen_server:cast(Name, {del_waiting, Topic, {self(), Reference}}).
 
 %%%=============================================================================
 %%% gen_server callbacks
 %%%=============================================================================
 
--record(state, {}).
+-record(state, {name :: atom()}).
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-init([]) ->
+init([Name]) ->
     Nodes = nodes(),
     ok = net_kernel:monitor_nodes(true),
     lists:foreach(
       fun(Node) ->
-              {?BACKEND_NAME, Node} ! {new, ?MODULE, node()},
+              {Name, Node} ! {new, ?MODULE, node()},
               self() ! {nodeup, Node}
       end, Nodes),
     ?MODULE = ets:new(?MODULE, [ordered_set, protected, named_table]),
-    {ok, #state{}}.
+    {ok, #state{name = Name}}.
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -154,7 +156,7 @@ handle_call(_Request, _From, State) ->
 %%------------------------------------------------------------------------------
 handle_cast({add_waiting, Topic, Who, BadSs}, State) ->
     SubscribersLeft = empty(unsubscribe(Topic, BadSs)),
-    add_waiting(SubscribersLeft, Topic, Who),
+    ets_add_waiting(SubscribersLeft, Topic, Who),
     {noreply, State};
 handle_cast({del_waiting, Topic, Who}, State) ->
     true = ets:delete(?MODULE, {waiting, Topic, Who}),
@@ -168,11 +170,11 @@ handle_cast(_Request, State) ->
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-handle_info({nodeup, Node}, State) ->
-    gen_server:cast({?BACKEND_NAME, Node}, {merge, all_subscribers()}),
+handle_info({nodeup, Node}, State = #state{name = Name}) ->
+    gen_server:cast({Name, Node}, {merge, all_subscribers()}),
     {noreply, State};
-handle_info({new, ?MODULE, Node}, State) ->
-    gen_server:cast({?BACKEND_NAME, Node}, {merge, all_subscribers()}),
+handle_info({new, ?MODULE, Node}, State = #state{name = Name}) ->
+    gen_server:cast({Name, Node}, {merge, all_subscribers()}),
     {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -239,15 +241,15 @@ unsubscribe(Topic, Subscriber) ->
 %% If valid subscribers for the topic are still available, the process will not
 %% be added and notified instead.
 %%------------------------------------------------------------------------------
-add_waiting(true, Topic, Who) ->
+ets_add_waiting(true, Topic, Who) ->
     case subscribers(Topic) of
         [] ->
-            add_waiting(false, Topic, Who);
+            ets_add_waiting(false, Topic, Who);
         Subscribers ->
             %% still subscribers available, notify immediatelly
             notify([Who], Topic, Subscribers)
     end;
-add_waiting(false, Topic, Who) ->
+ets_add_waiting(false, Topic, Who) ->
     %% no subscribers, need to wait for new subscriptions
     ets:insert_new(?MODULE, {{waiting, Topic, Who}}).
 
@@ -267,7 +269,7 @@ notify_on_subscribe(true, Topic) ->
 notify_waiting([], _Topic) ->
     ok;
 notify_waiting(Subscribers, Topic) ->
-    case waiting(Topic) of
+    case ets_get_waiting(Topic) of
         [] ->
             ok;
         Waiting ->
@@ -286,7 +288,8 @@ notify(Whos, Topic, Subscribers) ->
 %% @private
 %% Return all currently waiting processes for a topic.
 %%------------------------------------------------------------------------------
-waiting(Topic) -> [W || [W] <- ets:match(?MODULE, {{waiting, Topic, '$1'}})].
+ets_get_waiting(Topic) ->
+    [W || [W] <- ets:match(?MODULE, {{waiting, Topic, '$1'}})].
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -341,16 +344,16 @@ ensure_entry(Key, Initial) ->
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-multi_call(Topic, Message) ->
-    Fun = fun() -> gen_server:multi_call(?BACKEND_NAME, Message) end,
+multi_call(Name, Topic, Message) ->
+    Fun = fun() -> gen_server:multi_call(Name, Message) end,
     global:trans({{?MODULE, Topic}, self()}, Fun),
     ok.
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-multi_cast(Topic, Message) ->
-    spawn(fun() -> multi_call(Topic, Message) end),
+multi_cast(Name, Topic, Message) ->
+    spawn(fun() -> multi_call(Name, Topic, Message) end),
     ok.
 
 %%------------------------------------------------------------------------------
