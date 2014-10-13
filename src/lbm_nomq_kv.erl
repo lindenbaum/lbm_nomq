@@ -22,7 +22,7 @@
 
 -behaviour(gen_server).
 -behaviour(lbm_nomq_dist).
--behaviour(lbm_kv).
+%%-behaviour(lbm_kv).
 
 %% Internal API
 -export([start_link/1]).
