@@ -27,7 +27,6 @@
          del_waiting/2]).
 
 -define(BACKEND, lbm_nomq_ets).
-%%-define(BACKEND, lbm_nomq_kv).
 
 %%%=============================================================================
 %%% Behaviour
