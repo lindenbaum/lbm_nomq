@@ -20,7 +20,7 @@
 %%%=============================================================================
 {application, lbm_nomq,
  [{description, "."},
-  {id, "A distributed message queue (not really)."},
+  {id, "A reliable, distributed messaging mechanism."},
   {vsn, "0.0.1"},
   {registered,
    [
