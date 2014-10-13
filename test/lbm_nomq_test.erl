@@ -116,7 +116,7 @@ concurrency() ->
                 receive {'DOWN', SR, process, S, normal} -> ok end
         end,
     Time = element(1, timer:tc(F)),
-    ?DBG("~p MESSAGES on 1 receiver took ~pms~n", [Messages, Time / 1000]).
+    ?DBG("~p MESSAGES 1 RECEIVER  1 NODE:  ~pms~n", [Messages, Time / 1000]).
 
 concurrency_with_exits() ->
     Messages = 20000,
@@ -138,7 +138,7 @@ concurrency_with_exits() ->
                 receive {'DOWN', SR3, process, S3, normal} -> ok end
         end,
     Time = element(1, timer:tc(F)),
-    ?DBG("~p MESSAGES on 3 receivers took ~pms~n", [Messages, Time / 1000]).
+    ?DBG("~p MESSAGES 3 RECEIVERS 1 NODE:  ~pms~n", [Messages, Time / 1000]).
 
 concurrency_distributed() ->
     process_flag(trap_exit, true),
@@ -174,7 +174,7 @@ concurrency_distributed() ->
                 receive {'EXIT', S4, normal} -> ok end
         end,
     Time = element(1, timer:tc(F)),
-    ?DBG("~p MESSAGES on 4 nodes/receivers took ~pms~n", [Messages, Time / 1000]).
+    ?DBG("~p MESSAGES 4 RECEIVERS 4 NODES: ~pms~n", [Messages, Time / 1000]).
 
 %%%=============================================================================
 %%% Internal functions
@@ -248,10 +248,17 @@ for_loop(I, F, As, Acc) -> for_loop(I - 1, F, As, [apply(F, [I | As]) | Acc]).
 setup() ->
     fun() ->
             ok = distribute(master),
-            {ok, Apps} = application:ensure_all_started(lbm_nomq),
-            error_logger:tty(false),
-            Apps
+            setup_apps()
     end.
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+setup_apps() ->
+    application:load(sasl),
+    ok = application:set_env(sasl, sasl_error_logger, false),
+    {ok, Apps} = application:ensure_all_started(lbm_nomq),
+    Apps.
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -289,10 +296,8 @@ slave_setup(Name) ->
 %%------------------------------------------------------------------------------
 slave_setup_env(Node) ->
     Paths = code:get_path(),
-    PathFun = fun() -> [code:add_patha(P)|| P <- Paths] end,
-    ok = slave_execute(Node, PathFun),
-    AppFun = fun() -> {ok, _} = application:ensure_all_started(lbm_nomq) end,
-    ok = slave_execute(Node, AppFun).
+    ok = slave_execute(Node, fun() -> [code:add_patha(P)|| P <- Paths] end),
+    ok = slave_execute(Node, fun() -> setup_apps() end).
 
 %%------------------------------------------------------------------------------
 %% @private
