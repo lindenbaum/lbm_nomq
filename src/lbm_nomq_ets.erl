@@ -43,7 +43,8 @@
          del_subscribers/3,
          get_subscribers/2,
          add_waiting/3,
-         del_waiting/3]).
+         del_waiting/3,
+         info/1]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -115,7 +116,7 @@ get_subscribers(_Name, Topic) ->
 %%------------------------------------------------------------------------------
 -spec add_waiting(atom(), lbm_nomq:topic(), [#lbm_nomq_subscr{}]) ->
                          {ok, reference()}.
-add_waiting(Name, Topic, BadSs) ->
+add_waiting(Name, Topic, BadSs) when is_list(BadSs) ->
     Reference = make_ref(),
     Request = {add_waiting, Topic, {self(), Reference}, BadSs},
     {gen_server:cast(Name, Request), Reference}.
@@ -126,6 +127,19 @@ add_waiting(Name, Topic, BadSs) ->
 -spec del_waiting(atom(), lbm_nomq:topic(), reference()) -> ok.
 del_waiting(Name, Topic, Reference) ->
     gen_server:cast(Name, {del_waiting, Topic, {self(), Reference}}).
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+-spec info(atom()) -> ok.
+info(_Name) ->
+    Subscriptions = all_subscribers(),
+    io:format("~w topics~n", [length(Subscriptions)]),
+    [begin
+         io:format(" * ~w subscribers for topic ~s~n", [length(Subscrs), Topic]),
+         [io:format("   * ~w~n", [Subscr]) || Subscr <- Subscrs]
+     end || [Topic, Subscrs] <- Subscriptions],
+    io:format("~n").
 
 %%%=============================================================================
 %%% gen_server callbacks

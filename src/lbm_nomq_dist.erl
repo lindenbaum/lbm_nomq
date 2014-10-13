@@ -33,7 +33,8 @@
          del_subscribers/2,
          get_subscribers/1,
          add_waiting/2,
-         del_waiting/2]).
+         del_waiting/2,
+         info/0]).
 
 -define(BACKEND, lbm_nomq_ets).
 
@@ -67,6 +68,9 @@
 %% function is only necessary if the process gives up waiting for subscribers.
 %% The wait entry will be removed automatically, when a subscriber update is
 %% sent from this server.
+
+-callback info(atom()) -> ok.
+%% Print the current topic and subscriber info to stdout.
 
 %%%=============================================================================
 %%% lbm_nomq_dist callbacks
@@ -111,3 +115,9 @@ add_waiting(Topic, BadSubscribers) ->
 -spec del_waiting(lbm_nomq:topic(), reference()) -> ok.
 del_waiting(Topic, Reference) ->
     ?BACKEND:del_waiting(?MODULE, Topic, Reference).
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+-spec info() -> ok.
+info() -> ?BACKEND:info(?MODULE).

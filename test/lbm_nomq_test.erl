@@ -74,6 +74,8 @@ basic_push() ->
     {S, _} = spawn_monitor(subscriber(?TOPIC, length(Messages))),
     receive {subscribed, S} -> ok end,
 
+    ok = lbm_nomq:info(),
+
     {P, _} = spawn_monitor(pusher(?TOPIC, Messages)),
 
     receive {'DOWN', _, process, S, normal} -> ok end,

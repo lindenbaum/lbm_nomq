@@ -43,7 +43,8 @@
          subscribe/2,
          push/2,
          push/3,
-         push/4]).
+         push/4,
+         info/0]).
 
 %% Application callbacks
 -export([start/2, stop/1]).
@@ -157,6 +158,14 @@ push(Topic, Message, Timeout) -> push(Topic, Message, Timeout, []).
 -spec push(topic(), term(), non_neg_integer() | infinity, [no_wait]) -> any().
 push(Topic, Message, Timeout, Options) ->
     push_loop(get_subscribers(Topic), [], Topic, Message, Timeout, Options).
+
+%%------------------------------------------------------------------------------
+%% @doc
+%% Print topic and subscriber info to stdout.
+%% @end
+%%------------------------------------------------------------------------------
+-spec info() -> ok.
+info() -> lbm_nomq_dist:info().
 
 %%%=============================================================================
 %%% Application callbacks
