@@ -3,7 +3,7 @@
 lbm_nomq
 ========
 
-An implementation of a reliable message queue mechanism for the use in Erlang
+An implementation of a reliable messaging mechanism for the use in Erlang
 clusters (using Erlang distribution).
 
 `lbm_nomq` is built around the idea to have reliable, topic based message
