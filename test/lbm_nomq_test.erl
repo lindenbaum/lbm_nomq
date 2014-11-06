@@ -58,14 +58,16 @@ no_subscribers() ->
     try lbm_nomq:push(?TOPIC, msg, 100) of
         _ -> throw(test_failed)
     catch
-        exit:{timeout, {lbm_nomq, push, [?TOPIC, msg, 100]}} -> ok
+        exit:{timeout, {lbm_nomq, push, [?TOPIC, msg, 100, []]}} ->
+            ok
     end.
 
 no_subscribers_no_wait() ->
     try lbm_nomq:push(?TOPIC, msg, 100, [no_wait]) of
         _ -> throw(test_failed)
     catch
-        exit:{no_subscribers, {lbm_nomq, push, [?TOPIC, msg, 100]}} -> ok
+        exit:{no_subscribers, {lbm_nomq, push, [?TOPIC, msg, 100, [no_wait]]}} ->
+            ok
     end.
 
 basic_push() ->
