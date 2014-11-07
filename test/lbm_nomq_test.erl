@@ -31,28 +31,39 @@
 
 -define(DBG(Fmt, Args), io:format(standard_error, Fmt, Args)).
 
+-define(DOWN(Ref, Pid), receive {'DOWN', Ref, process, Pid, normal} -> ok end).
+-define(DOWN_FUN, fun(_) -> ?DOWN(_, _) end).
+
+-define(EXIT(Pid), receive {'EXIT', Pid, normal} -> ok end).
+-define(EXIT_FUN, fun(_) -> ?EXIT(_) end).
+
+-define(TIMEOUT, 30).
+
 %%%=============================================================================
 %%% TESTS
 %%%=============================================================================
 
 all_test_() ->
-    {setup, setup(), teardown(),
+    {foreach, setup(), teardown(),
      [
+      fun report_header/0,
       fun basic_subscribe/0,
       fun no_subscribers/0,
       fun no_subscribers_no_wait/0,
       fun basic_push/0,
       fun multiple_subscribers/0,
       fun late_subscribe/0,
-      {timeout, 60, fun concurrency/0},
-      {timeout, 60, fun concurrency_with_exits/0},
-      {timeout, 60, fun concurrency_distributed/0}
+      {spawn, fun one_topic_many_concurrent_pushers/0},
+      {spawn, fun one_topic_many_concurrent_pushers_subscribers_exit/0},
+      {timeout, ?TIMEOUT, {spawn, fun one_topic_many_concurrent_pushers_distributed_setup/0}},
+      {timeout, ?TIMEOUT, {spawn, fun many_topics_many_concurrent_pushers/0}},
+      {timeout, ?TIMEOUT, {spawn, fun many_topics_many_concurrent_pushers_distributed_setup/0}}
      ]}.
 
 basic_subscribe() ->
-    {S, _} = spawn_monitor(subscriber(?TOPIC, 0)),
+    {S, SR} = spawn_monitor(subscriber(?TOPIC, 0)),
     receive {subscribed, S} -> ok end,
-    receive {'DOWN', _, process, S, normal} -> ok end.
+    ?DOWN(SR, S).
 
 no_subscribers() ->
     try lbm_nomq:push(?TOPIC, msg, 100) of
@@ -73,121 +84,191 @@ no_subscribers_no_wait() ->
 basic_push() ->
     Messages = [msg1, msg2, msg3],
 
-    {S, _} = spawn_monitor(subscriber(?TOPIC, length(Messages))),
+    {S, SR} = spawn_monitor(subscriber(?TOPIC, length(Messages))),
     receive {subscribed, S} -> ok end,
 
     ok = lbm_nomq:info(),
 
-    {P, _} = spawn_monitor(pusher(?TOPIC, Messages)),
+    {P, PR} = spawn_monitor(pusher(?TOPIC, Messages)),
 
-    receive {'DOWN', _, process, S, normal} -> ok end,
-    receive {'DOWN', _, process, P, normal} -> ok end,
+    ?DOWN(SR, S),
+    ?DOWN(PR, P),
 
     {'EXIT', {timeout, _}} = (catch lbm_nomq:push(?TOPIC, msg, 100)).
 
 multiple_subscribers() ->
-    {S1, _} = spawn_monitor(subscriber(?TOPIC, 1)),
+    {S1, S1R} = spawn_monitor(subscriber(?TOPIC, 1)),
     receive {subscribed, S1} -> ok end,
 
-    {S2, _} = spawn_monitor(subscriber(?TOPIC, 1)),
+    {S2, S2R} = spawn_monitor(subscriber(?TOPIC, 1)),
     receive {subscribed, S2} -> ok end,
 
-    {S3, _} = spawn_monitor(subscriber(?TOPIC, 1)),
+    {S3, S3R} = spawn_monitor(subscriber(?TOPIC, 1)),
     receive {subscribed, S3} -> ok end,
 
-    {P, _} = spawn_monitor(pusher(?TOPIC, [stop, stop, stop])),
+    {P, PR} = spawn_monitor(pusher(?TOPIC, [stop, stop, stop])),
 
-    receive {'DOWN', _, process, S1, normal} -> ok end,
-    receive {'DOWN', _, process, S2, normal} -> ok end,
-    receive {'DOWN', _, process, S3, normal} -> ok end,
-    receive {'DOWN', _, process, P, normal} -> ok end,
+    ?DOWN(S1R, S1),
+    ?DOWN(S2R, S2),
+    ?DOWN(S3R, S3),
+    ?DOWN(PR, P),
 
     {'EXIT', {timeout, _}} = (catch lbm_nomq:push(?TOPIC, msg, 100)).
 
 late_subscribe() ->
     Messages = [msg1, msg2, msg3],
 
-    {P, _} = spawn_monitor(pusher(?TOPIC, Messages)),
+    {P, PR} = spawn_monitor(pusher(?TOPIC, Messages)),
 
     timer:sleep(500),
 
-    {S, _} = spawn_monitor(subscriber(?TOPIC, length(Messages))),
+    {S, SR} = spawn_monitor(subscriber(?TOPIC, length(Messages))),
     receive {subscribed, S} -> ok end,
 
-    receive {'DOWN', _, process, P, normal} -> ok end,
-    receive {'DOWN', _, process, S, normal} -> ok end,
+    ?DOWN(PR, P),
+    ?DOWN(SR, S),
 
     {'EXIT', {timeout, _}} = (catch lbm_nomq:push(?TOPIC, msg, 100)).
 
-concurrency() ->
-    Messages = 20000,
-    Spawn = fun(M) -> spawn_monitor(pusher(?TOPIC, [M])) end,
-    Down = fun({P, PR}) -> receive {'DOWN', PR, _, P, normal} -> ok end end,
-    F = fun() ->
-                {S, SR} = spawn_monitor(subscriber(?TOPIC, Messages)),
-                ok = lists:foreach(Down, for(Messages, Spawn)),
-                receive {'DOWN', SR, process, S, normal} -> ok end
-        end,
-    Time = element(1, timer:tc(F)),
-    ?DBG("~p MESSAGES 1 RECEIVER  1 NODE:  ~pms~n", [Messages, Time / 1000]).
+one_topic_many_concurrent_pushers() ->
+    Messages = 100000,
+    Pusher = fun(Message) ->
+                     spawn_monitor(pusher(?TOPIC, [Message]))
+             end,
+    Test = fun() ->
+                   spawn_monitor(subscriber(?TOPIC, Messages)),
+                   for(Messages, Pusher),
+                   for(Messages + 1, ?DOWN_FUN)
+           end,
+    Time = element(1, timer:tc(Test)),
+    report(Messages, 1, 1, 1, Time).
 
-concurrency_with_exits() ->
-    Messages = 20000,
-    NumTerms1 = NumTerms2 = Messages div 3,
-    NumTerms3 = Messages - 2*(NumTerms1),
+one_topic_many_concurrent_pushers_subscribers_exit() ->
+    Subscribers = 4,
+    Messages = 100000,
+    NumTermsPerSubscriber = Messages div Subscribers,
 
-    Spawn = fun(M) -> spawn_monitor(pusher(?TOPIC, [M])) end,
-    Down = fun({P, PR}) -> receive {'DOWN', PR, _, P, normal} -> ok end end,
-    F = fun() ->
-                {S1, SR1} = spawn_monitor(subscriber(?TOPIC, NumTerms1)),
-                Ps = for(Messages, Spawn),
+    Pusher = fun(Message) ->
+                     spawn_monitor(pusher(?TOPIC, [Message]))
+             end,
+    Subscriber = fun() ->
+                         spawn_monitor(subscriber(?TOPIC, NumTermsPerSubscriber))
+                 end,
+    Test = fun() ->
+                   {S1, SR1} = Subscriber(),
+                   for(Messages, Pusher),
 
-                receive {'DOWN', SR1, process, S1, normal} -> ok end,
-                {S2, SR2} = spawn_monitor(subscriber(?TOPIC, NumTerms2)),
-                {S3, SR3} = spawn_monitor(subscriber(?TOPIC, NumTerms3)),
+                   ?DOWN(SR1, S1),
+                   [Subscriber() || _ <- lists:seq(1, Subscribers - 1)],
 
-                ok = lists:foreach(Down, Ps),
-                receive {'DOWN', SR2, process, S2, normal} -> ok end,
-                receive {'DOWN', SR3, process, S3, normal} -> ok end
-        end,
-    Time = element(1, timer:tc(F)),
-    ?DBG("~p MESSAGES 3 RECEIVERS 1 NODE:  ~pms~n", [Messages, Time / 1000]).
+                   for(Messages + (Subscribers - 1), ?DOWN_FUN)
+           end,
+    Time = element(1, timer:tc(Test)),
+    report(Messages, 1, Subscribers, 1, Time).
 
-concurrency_distributed() ->
+one_topic_many_concurrent_pushers_distributed_setup() ->
     process_flag(trap_exit, true),
-
-    Messages = 20000,
-    NumTerms1 = NumTerms2 = NumTerms3 = Messages div 4,
-    NumTerms4 = Messages - 3*(NumTerms1),
 
     {ok, Slave1} = slave_setup(slave1),
     {ok, Slave2} = slave_setup(slave2),
     {ok, Slave3} = slave_setup(slave3),
 
-    Spawn = fun(M, N) -> spawn_link(N, pusher(?TOPIC, [M])) end,
-    Exit = fun(P) -> receive {'EXIT', P, normal} -> ok end end,
-    F = fun() ->
-                S1 = spawn_link(node(), subscriber(?TOPIC, NumTerms1)),
-                Ps4 = for(NumTerms1, Spawn, [Slave3]),
-                Ps3 = for(NumTerms2, Spawn, [Slave2]),
-                Ps2 = for(NumTerms3, Spawn, [Slave1]),
-                Ps1 = for(NumTerms4, Spawn, [node()]),
+    Nodes = [Slave3, Slave2, Slave1, node()],
+    NumNodes = length(Nodes),
+    Messages = 100000,
+    NumPushesPerNode = Messages div NumNodes,
 
-                receive {'EXIT', S1, normal} -> ok end,
-                S2 = spawn_link(Slave1, subscriber(?TOPIC, NumTerms2)),
-                S3 = spawn_link(Slave2, subscriber(?TOPIC, NumTerms3)),
-                S4 = spawn_link(Slave3, subscriber(?TOPIC, NumTerms4)),
+    Pusher = fun(Message, Node) ->
+                     spawn_link(Node, pusher(?TOPIC, [Message]))
+             end,
+    Subscriber = fun(Node) ->
+                         spawn_link(Node, subscriber(?TOPIC, NumPushesPerNode))
+                 end,
+    Test = fun() ->
+                   S0 = Subscriber(node()),
+                   foreach(
+                     fun(N) ->
+                             for(NumPushesPerNode, Pusher, [N])
+                     end, Nodes),
 
-                ok = lists:foreach(Exit, Ps4),
-                ok = lists:foreach(Exit, Ps3),
-                ok = lists:foreach(Exit, Ps2),
-                ok = lists:foreach(Exit, Ps1),
-                receive {'EXIT', S2, normal} -> ok end,
-                receive {'EXIT', S3, normal} -> ok end,
-                receive {'EXIT', S4, normal} -> ok end
-        end,
-    Time = element(1, timer:tc(F)),
-    ?DBG("~p MESSAGES 4 RECEIVERS 4 NODES: ~pms~n", [Messages, Time / 1000]).
+                   ?EXIT(S0),
+                   foreach(Subscriber, Nodes -- [node()]),
+                   for(Messages + (NumNodes - 1), ?EXIT_FUN)
+           end,
+    Time = element(1, timer:tc(Test)),
+    report(Messages, 1, NumNodes, NumNodes, Time).
+
+many_topics_many_concurrent_pushers() ->
+    Topics = 5000,
+    Messages = 100000,
+    MessagesPerTopic = Messages div Topics,
+    Pusher = fun(Topic) ->
+                     fun(Message) ->
+                             spawn_monitor(pusher(Topic, [Message]))
+                     end
+             end,
+    Subscriber = fun(Topic) ->
+                         spawn_monitor(subscriber(Topic, MessagesPerTopic))
+                 end,
+    Test = fun() ->
+                   for(Topics, Subscriber),
+                   foreach(
+                     fun(P) ->
+                             for(MessagesPerTopic, P)
+                     end, for(Topics, Pusher)),
+                   for(Topics + Messages, ?DOWN_FUN)
+           end,
+    Time = element(1, timer:tc(Test)),
+    report(Messages, Topics, Topics, 1, Time).
+
+many_topics_many_concurrent_pushers_distributed_setup() ->
+    process_flag(trap_exit, true),
+
+    {ok, Slave1} = slave_setup(slave1),
+    {ok, Slave2} = slave_setup(slave2),
+    {ok, Slave3} = slave_setup(slave3),
+
+    Nodes = [Slave3, Slave2, Slave1, node()],
+    NumNodes = length(Nodes),
+    Topics = 5000,
+    TopicsPerNode = Topics div NumNodes,
+
+    Messages = 100000,
+    MessagesPerTopic = Messages div Topics,
+    MessagesPerTopicPerNode = MessagesPerTopic div NumNodes,
+
+    Pusher = fun(Topic) ->
+                     fun(Message, Node) ->
+                             spawn_link(Node, pusher(Topic, [Message]))
+                     end
+             end,
+    Subscriber = fun(Topic) ->
+                         fun(Node) ->
+                                 spawn_link(Node, subscriber(Topic, MessagesPerTopic))
+                         end
+                 end,
+    Test = fun() ->
+                   Ps = for(Topics, Pusher),
+                   {SsList , []} = lists:mapfoldr(
+                                     fun(_, SsIn) ->
+                                             lists:split(TopicsPerNode, SsIn)
+                                     end, for(Topics, Subscriber), Nodes),
+
+                   foreach(
+                     fun(N) ->
+                             foreach(
+                               fun(P) ->
+                                       for(MessagesPerTopicPerNode, P, [N])
+                               end, Ps)
+                     end, Nodes),
+                   foreach(
+                     fun({N, Ss}) ->
+                             foreach(fun(S) -> S(N) end, Ss)
+                     end, lists:zip(Nodes, SsList)),
+                   for(Messages + Topics, ?EXIT_FUN)
+           end,
+    Time = element(1, timer:tc(Test)),
+    report(Messages, Topics, Topics, NumNodes, Time).
 
 %%%=============================================================================
 %%% Internal functions
@@ -199,7 +280,7 @@ concurrency_distributed() ->
 %%------------------------------------------------------------------------------
 pusher(Topic, Terms) ->
     fun() ->
-            [ok = lbm_nomq:push(Topic, Term) || Term <- Terms]
+            [ok = lbm_nomq:push(Topic, Term, ?TIMEOUT * 1000) || Term <- Terms]
     end.
 
 %%------------------------------------------------------------------------------
@@ -250,6 +331,11 @@ receive_loop(NumTerms) ->
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
+foreach(F, L) -> ok = lists:foreach(F, L).
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
 for(Num, Fun)           -> for(Num, Fun, []).
 for(Num, Fun, Args)     -> for_loop(Num, Fun, Args, []).
 for_loop(0, _,  _, Acc) -> lists:reverse(Acc);
@@ -267,18 +353,27 @@ setup() ->
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
+-ifdef(DEBUG).
 setup_apps() ->
     application:load(sasl),
+    {ok, Apps} = application:ensure_all_started(lbm_nomq),
+    Apps.
+-else.
+setup_apps() ->
+    application:load(sasl),
+    error_logger:tty(false),
     ok = application:set_env(sasl, sasl_error_logger, false),
     {ok, Apps} = application:ensure_all_started(lbm_nomq),
     Apps.
+-endif.
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
 teardown() ->
     fun(Apps) ->
-            [application:stop(App) || App <- Apps]
+            [application:stop(App) || App <- Apps],
+            error_logger:tty(true)
     end.
 
 %%------------------------------------------------------------------------------
@@ -320,8 +415,27 @@ slave_execute(Node, Fun) ->
     Pid = spawn_link(Node, Fun),
     receive
         {'EXIT', Pid, normal} -> ok;
-        {'DOWN', Pid, Reason} -> {error, Reason}
+        {'EXIT', Pid, Reason} -> {error, Reason}
     end.
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+report_header() ->
+    ?DBG("~n", []),
+    ?DBG("MESSAGES | TOPICS | RECEIVERS | NODES | MILLISECONDS~n", []),
+    ?DBG("---------+--------+-----------+-------+-------------~n", []).
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+report(Messages, Topics, Receivers, Nodes, MicroSeconds) ->
+    ?DBG("~8s | ~6s | ~9s | ~5s | ~w~n",
+         [io_lib:write(Messages),
+          io_lib:write(Topics),
+          io_lib:write(Receivers),
+          io_lib:write(Nodes),
+          MicroSeconds / 1000]).
 
 %%------------------------------------------------------------------------------
 %% @private
