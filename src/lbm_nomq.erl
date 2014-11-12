@@ -61,7 +61,7 @@
 
 -include("lbm_nomq.hrl").
 
--define(SUBSCRIBER(M, F, As), #lbm_nomq_subscr{m = M, f = F, as = As}).
+-define(S(M, F, As), #lbm_nomq_subscr{m = M, f = F, as = As}).
 
 %%%=============================================================================
 %%% API
@@ -110,9 +110,9 @@ subscribe(Topic, {M, F, As}) when is_list(As) ->
         {module, M} ->
             case erlang:function_exported(M, F, length(As) + 2) of
                 true ->
-                    add_subscriber(Topic, ?SUBSCRIBER(M, F, As));
+                    add_subscriber(Topic, ?S(M, F, As));
                 false when M =:= erlang ->
-                    add_subscriber(Topic, ?SUBSCRIBER(M, F, As));
+                    add_subscriber(Topic, ?S(M, F, As));
                 false ->
                     {error, {undef, {F, length(As) + 1}}}
             end;
@@ -145,21 +145,23 @@ push(Topic, Message, Timeout) -> push(Topic, Message, Timeout, []).
 %% `Timeout' expires).
 %%
 %% If a push finally fails, the caller will be exited with
-%% `exit({timeout, {lbm_nomq, push, [Topic, Msg, Timeout]}})'. If the calling
-%% process decides to catch this error and a subscriber is just late with the
-%% reply, it may arrive at any time later into the caller's message queue. The
-%% caller must in this case be prepared for this and discard any such garbage
-%% messages.
+%% `exit({timeout, {lbm_nomq, push, [Topic, Msg, Timeout, Options]}})'. If the
+%% calling process decides to catch this error and a subscriber is just late
+%% with the reply, it may arrive at any time later into the caller's message
+%% queue. The caller must in this case be prepared for this and discard any such
+%% garbage messages.
 %%
 %% The only option currently supported, is the `no_wait' option. If this flag
 %% is given, the caller will not wait for subscribers (e.g. only bad or no
 %% subscribers for `Topic' could be found) and will be exited immediately with
-%% `exit({no_subscribers, {lbm_nomq, push, [Topic, Msg, Timeout]}})' instead.
+%% `exit({no_subscribers, {lbm_nomq, push, [Topic, Msg, Timeout, Options]}})'
+%% instead.
 %% @end
 %%------------------------------------------------------------------------------
 -spec push(topic(), term(), non_neg_integer() | infinity, [option()]) -> any().
 push(Topic, Message, Timeout, Options) ->
-    push_loop(get_subscribers(Topic), [], Topic, Message, Timeout, Options).
+    Args = {Topic, Message, Timeout, Options},
+    push_loop(get_subscribers(Topic), [], Args, Timeout).
 
 %%------------------------------------------------------------------------------
 %% @doc
@@ -221,19 +223,20 @@ get_subscribers(Topic) -> shuffle(lbm_nomq_dist:get_subscribers(Topic)).
 %% @private
 %% Try to push a message reliably to exactly one subscriber. If no good
 %% subscribers can be found, the loop will block the caller until either new
-%% subscribers register and handle the message or the given timeout expires.
+%% subscribers register and handle the message or the given timeout expires
+%% (unless the `no_wait' option is specified).
 %%------------------------------------------------------------------------------
-push_loop([], _BadSs, Topic, Msg, Timeout, Opts = [no_wait]) ->
-    exit({no_subscribers, {?MODULE, push, [Topic, Msg, Timeout, Opts]}});
-push_loop([], BadSs, Topic, Msg, Timeout, Opts) ->
+push_loop([], BadSs, Args = {Topic, _, _, Opts}, Timeout) ->
+    ok = exit_if_no_wait(Opts, Args),
     {ok, PushRef} = lbm_nomq_dist:add_waiting(Topic, BadSs),
     case wait(Topic, PushRef, Timeout, send_after(Timeout, Topic, PushRef)) of
-        {ok, {Subscribers, Time}} ->
-            push_loop(Subscribers, [], Topic, Msg, Time, Opts);
+        {ok, {Subscribers, NewTimeout}} ->
+            push_loop(Subscribers, [], Args, NewTimeout);
         {error, timeout} ->
-            exit({timeout, {?MODULE, push, [Topic, Msg, Timeout, Opts]}})
+            exit({timeout, {?MODULE, push, tuple_to_list(Args)}})
     end;
-push_loop([S = ?SUBSCRIBER(M, F, As) | Ss], BadSs, Topic, Msg, Timeout, Opts) ->
+push_loop([S = ?S(M, F, As) | Ss], BadSs, Args = {Topic, Msg, _, _}, Timeout) ->
+    StartTimestamp = os:timestamp(),
     try erlang:apply(M, F, As ++ [Msg, Timeout]) of
         Result ->
             ok = lbm_nomq_dist:del_subscribers(Topic, BadSs),
@@ -241,12 +244,14 @@ push_loop([S = ?SUBSCRIBER(M, F, As) | Ss], BadSs, Topic, Msg, Timeout, Opts) ->
     catch
         exit:{timeout, _} ->
             %% subscriber is not dead, only overloaded... anyway Timeout is over
-            exit({timeout, {?MODULE, push, [Topic, Msg, Timeout, Opts]}});
+            exit({timeout, {?MODULE, push, tuple_to_list(Args)}});
         exit:_  ->
-            push_loop(Ss, [S | BadSs], Topic, Msg, Timeout, Opts);
-        error:badarg when M =:= gen_fsm, is_atom(hd(As)) ->
-            %% for gen_fsm, when sending to invalid (local) registered name
-            push_loop(Ss, [S | BadSs], Topic, Msg, Timeout, Opts)
+            NewTimeout = remaining_millis(Timeout, StartTimestamp),
+            push_loop(Ss, [S | BadSs], Args, NewTimeout);
+        error:badarg when M =:= gen_fsm, As =/= [], is_atom(hd(As)) ->
+            %% for gen_fsm, when sending to invalid (locally) registered name
+            NewTimeout = remaining_millis(Timeout, StartTimestamp),
+            push_loop(Ss, [S | BadSs], Args, NewTimeout)
     end.
 
 %%------------------------------------------------------------------------------
@@ -313,3 +318,28 @@ shuffle(L) when is_list(L) ->
     shuffle(L, length(L)).
 shuffle(L, Len) ->
     [E || {_, E} <- lists:sort([{crypto:rand_uniform(0, Len), E} || E <- L])].
+
+%%------------------------------------------------------------------------------
+%% @private
+%% Exits the calling process, if the `no_wait' option is specified.
+%%------------------------------------------------------------------------------
+exit_if_no_wait(Opts, Args) ->
+    case lists:member(no_wait, Opts) of
+        true ->
+            exit({no_subscribers, {?MODULE, push, tuple_to_list(Args)}});
+        false ->
+            ok
+    end.
+
+%%------------------------------------------------------------------------------
+%% @private
+%% Calculate the remaining value for `Timeout' given a start timestamp.
+%%------------------------------------------------------------------------------
+remaining_millis(Timeout, StartTimestamp) ->
+    Timeout - (to_millis(os:timestamp()) - to_millis(StartTimestamp)).
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+to_millis({MegaSecs, Secs, MicroSecs}) ->
+    MegaSecs * 1000000000 + Secs * 1000 + MicroSecs div 1000.
