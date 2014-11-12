@@ -63,11 +63,11 @@ all_test_() ->
 basic_subscribe() ->
     {S, SR} = spawn_monitor(subscriber(?TOPIC, 0)),
     receive {subscribed, S} -> ok end,
-    ?assertEqual(1, lbm_nomq:num_subscribers(?TOPIC)),
+    ?assertEqual(1, length(lbm_nomq:subscribers(?TOPIC))),
     ?DOWN(SR, S).
 
 no_subscribers() ->
-    ?assertEqual(0, lbm_nomq:num_subscribers(?TOPIC)),
+    ?assertEqual(0, length(lbm_nomq:subscribers(?TOPIC))),
     try lbm_nomq:push(?TOPIC, msg, 100) of
         _ -> throw(test_failed)
     catch
@@ -76,7 +76,7 @@ no_subscribers() ->
     end.
 
 no_subscribers_no_wait() ->
-    ?assertEqual(0, lbm_nomq:num_subscribers(?TOPIC)),
+    ?assertEqual(0, length(lbm_nomq:subscribers(?TOPIC))),
     try lbm_nomq:push(?TOPIC, msg, 100, [no_wait]) of
         _ -> throw(test_failed)
     catch
@@ -89,7 +89,7 @@ basic_push() ->
 
     {S, SR} = spawn_monitor(subscriber(?TOPIC, length(Messages))),
     receive {subscribed, S} -> ok end,
-    ?assertEqual(1, lbm_nomq:num_subscribers(?TOPIC)),
+    ?assertEqual(1, length(lbm_nomq:subscribers(?TOPIC))),
 
     ok = lbm_nomq:info(),
 
@@ -103,15 +103,15 @@ basic_push() ->
 multiple_subscribers() ->
     {S1, S1R} = spawn_monitor(subscriber(?TOPIC, 1)),
     receive {subscribed, S1} -> ok end,
-    ?assertEqual(1, lbm_nomq:num_subscribers(?TOPIC)),
+    ?assertEqual(1, length(lbm_nomq:subscribers(?TOPIC))),
 
     {S2, S2R} = spawn_monitor(subscriber(?TOPIC, 1)),
     receive {subscribed, S2} -> ok end,
-    ?assertEqual(2, lbm_nomq:num_subscribers(?TOPIC)),
+    ?assertEqual(2, length(lbm_nomq:subscribers(?TOPIC))),
 
     {S3, S3R} = spawn_monitor(subscriber(?TOPIC, 1)),
     receive {subscribed, S3} -> ok end,
-    ?assertEqual(3, lbm_nomq:num_subscribers(?TOPIC)),
+    ?assertEqual(3, length(lbm_nomq:subscribers(?TOPIC))),
 
     {P, PR} = spawn_monitor(pusher(?TOPIC, [stop, stop, stop])),
 
@@ -131,7 +131,7 @@ late_subscribe() ->
 
     {S, SR} = spawn_monitor(subscriber(?TOPIC, length(Messages))),
     receive {subscribed, S} -> ok end,
-    ?assertEqual(1, lbm_nomq:num_subscribers(?TOPIC)),
+    ?assertEqual(1, length(lbm_nomq:subscribers(?TOPIC))),
 
     ?DOWN(PR, P),
     ?DOWN(SR, S),

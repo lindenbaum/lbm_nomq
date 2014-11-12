@@ -41,10 +41,10 @@
 -export([subscribe_server/1,
          subscribe_fsm/1,
          subscribe/2,
+         subscribers/1,
          push/2,
          push/3,
          push/4,
-         num_subscribers/1,
          info/0]).
 
 %% Application callbacks
@@ -122,6 +122,16 @@ subscribe(Topic, {M, F, As}) when is_list(As) ->
 
 %%------------------------------------------------------------------------------
 %% @doc
+%% Return the subscribers currently registered for a certain topic. The returned
+%% list may contain subscribers that are already dead and will be sorted out
+%% when pushing the next time.
+%% @end
+%%------------------------------------------------------------------------------
+-spec subscribers(topic()) -> [#lbm_nomq_subscr{}].
+subscribers(Topic) -> lbm_nomq_dist:get_subscribers(Topic).
+
+%%------------------------------------------------------------------------------
+%% @doc
 %% Similar to {@link push/3} with `Timeout' set to `5000'.
 %% @end
 %%------------------------------------------------------------------------------
@@ -162,16 +172,6 @@ push(Topic, Message, Timeout) -> push(Topic, Message, Timeout, []).
 push(Topic, Message, Timeout, Options) ->
     Args = {Topic, Message, Timeout, Options},
     push_loop(get_subscribers(Topic), [], Args, Timeout).
-
-%%------------------------------------------------------------------------------
-%% @doc
-%% Return the number of subscribers currently registered for a certain topic.
-%% The returned number may contain subscribers that are already dead and will
-%% be sorted out when pushing the next time.
-%% @end
-%%------------------------------------------------------------------------------
--spec num_subscribers(topic()) -> non_neg_integer().
-num_subscribers(Topic) -> length(lbm_nomq_dist:get_subscribers(Topic)).
 
 %%------------------------------------------------------------------------------
 %% @doc
@@ -217,7 +217,7 @@ add_subscriber(Topic, Subscriber) ->
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-get_subscribers(Topic) -> shuffle(lbm_nomq_dist:get_subscribers(Topic)).
+get_subscribers(Topic) -> shuffle(subscribers(Topic)).
 
 %%------------------------------------------------------------------------------
 %% @private
