@@ -44,6 +44,7 @@
          push/2,
          push/3,
          push/4,
+         num_subscribers/1,
          info/0]).
 
 %% Application callbacks
@@ -159,6 +160,16 @@ push(Topic, Message, Timeout) -> push(Topic, Message, Timeout, []).
 -spec push(topic(), term(), non_neg_integer() | infinity, [option()]) -> any().
 push(Topic, Message, Timeout, Options) ->
     push_loop(get_subscribers(Topic), [], Topic, Message, Timeout, Options).
+
+%%------------------------------------------------------------------------------
+%% @doc
+%% Return the number of subscribers currently registered for a certain topic.
+%% The returned number may contain subscribers that are already dead and will
+%% be sorted out when pushing the next time.
+%% @end
+%%------------------------------------------------------------------------------
+-spec num_subscribers(topic()) -> non_neg_integer().
+num_subscribers(Topic) -> length(lbm_nomq_dist:get_subscribers(Topic)).
 
 %%------------------------------------------------------------------------------
 %% @doc
