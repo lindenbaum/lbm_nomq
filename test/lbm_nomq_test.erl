@@ -47,9 +47,11 @@ all_test_() ->
     {foreach, setup(), teardown(),
      [
       fun report_header/0,
+      fun mfa_undef/0,
       fun basic_subscribe/0,
       fun no_subscribers/0,
       fun no_subscribers_no_wait/0,
+      fun subscribe_with_monitor_option/0,
       fun basic_push/0,
       fun multiple_subscribers/0,
       fun late_subscribe/0,
@@ -59,6 +61,14 @@ all_test_() ->
       {timeout, ?TIMEOUT, {spawn, fun many_topics_many_concurrent_pushers/0}},
       {timeout, ?TIMEOUT, {spawn, fun many_topics_many_concurrent_pushers_distributed_setup/0}}
      ]}.
+
+mfa_undef() ->
+    ?assertEqual(
+       {error, nofile},
+       lbm_nomq:subscribe(?TOPIC, {module, function, []})),
+    ?assertEqual(
+       {error, {undef, lala}},
+       lbm_nomq:subscribe(?TOPIC, {gen_server, lala, []})).
 
 basic_subscribe() ->
     {S, SR} = spawn_monitor(subscriber(?TOPIC, 0)),
@@ -83,6 +93,19 @@ no_subscribers_no_wait() ->
         exit:{no_subscribers, {lbm_nomq, push, [?TOPIC, msg, 100, [no_wait]]}} ->
             ok
     end.
+
+subscribe_with_monitor_option() ->
+    {S1, SR1} = spawn_monitor(subscriber(?TOPIC, 1, true)),
+    receive {subscribed, S1} -> ok end,
+    ?assertEqual(1, length(lbm_nomq:subscribers(?TOPIC))),
+    exit(S1, kill),
+    receive {'DOWN', SR1, process, S1, killed} -> ok end,
+
+    {S2, SR2} = spawn_monitor(subscriber(?TOPIC, 1, true)),
+    receive {subscribed, S2} -> ok end,
+    ?assertEqual(1, length(lbm_nomq:subscribers(?TOPIC))),
+    exit(S2, kill),
+    receive {'DOWN', SR2, process, S2, killed} -> ok end.
 
 basic_push() ->
     Messages = [msg1, msg2, msg3],
@@ -296,10 +319,16 @@ pusher(Topic, Terms) ->
 %% Subscribe, receive the given number of terms and exit with reason normal.
 %%------------------------------------------------------------------------------
 subscriber(Topic, NumTerms) ->
+    subscriber(Topic, NumTerms, false).
+subscriber(Topic, NumTerms, WithMonitoring) ->
     Parent = self(),
     fun() ->
+            case WithMonitoring of
+                true  -> Options = [{monitor, self()}];
+                false -> Options = []
+            end,
             MFA = {?MODULE, call, [self()]},
-            ok = lbm_nomq:subscribe(Topic, MFA),
+            ok = lbm_nomq:subscribe(Topic, MFA, Options),
             Parent ! {subscribed, self()},
             receive_loop(NumTerms)
     end.

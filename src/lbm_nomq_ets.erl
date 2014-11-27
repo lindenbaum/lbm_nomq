@@ -193,6 +193,12 @@ handle_cast(_Request, State) ->
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
+handle_info({'DOWN', _Ref, process, Pid, _Reason}, State) ->
+    unsubscribe(Pid),
+    {noreply, State};
+handle_info({nodedown, Node}, State) ->
+    unsubscribe(Node),
+    {noreply, State};
 handle_info({nodeup, Node}, State = #state{name = Name}) ->
     gen_server:cast({Name, Node}, {merge, all_subscribers()}),
     {noreply, State};
@@ -228,6 +234,7 @@ subscribe(Topic, Subscriber) ->
     true = ensure_entry({topic, Topic}, 0),
     case ets:insert_new(?MODULE, {{subscriber, Topic, Subscriber}}) of
         true ->
+            true = maybe_monitor_subscriber(Subscriber),
             ets:update_counter(?MODULE, {topic, Topic}, {2, +1}),
             [Topic];
         false ->
@@ -257,6 +264,27 @@ unsubscribe(Topic, Subscriber) ->
         _ ->
             []
     end.
+
+%%------------------------------------------------------------------------------
+%% @private
+%% Remove all subscriptions associated with a certain process id or node. Topic
+%% entries will be removed if no more subscribers exist for it.
+%%------------------------------------------------------------------------------
+unsubscribe(Pid) when is_pid(Pid) ->
+    Pattern = {{subscriber, '_', #lbm_nomq_subscr{mon = Pid, _ = '_'}}},
+    lists:usort(
+      lists:append(
+        [unsubscribe(Topic, Subscriber)
+         || {{subscriber, Topic, Subscriber}}
+                <- ets:match_object(?MODULE, Pattern)]));
+unsubscribe(Node) when is_atom(Node) ->
+    Pattern = {{subscriber, '_', #lbm_nomq_subscr{mon = '$1', _ = '_'}}},
+    Guards = [{'=:=', {node, '$1'}, Node}],
+    lists:usort(
+      lists:append(
+        [unsubscribe(Topic, Subscriber)
+         || {{subscriber, Topic, Subscriber}}
+                <- ets:select(?MODULE, [{Pattern, Guards, ['$_']}])])).
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -366,6 +394,19 @@ ensure_entry(Key, Initial) ->
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Monitors an optional process id associated with a subscriber, if available
+%% and local to this `lbm_nomq_ets' instance.
+%%------------------------------------------------------------------------------
+maybe_monitor_subscriber(#lbm_nomq_subscr{mon = Pid}) ->
+    case is_pid(Pid) andalso node(Pid) =:= node() of
+        true ->
+            is_reference(erlang:monitor(process, Pid));
+        false ->
+            true
+    end.
+
+%%------------------------------------------------------------------------------
+%% @private
 %%------------------------------------------------------------------------------
 multi_call(Name, Topic, Message) ->
     Fun = fun() -> gen_server:multi_call(Name, Message) end,
@@ -384,3 +425,45 @@ multi_cast(Name, Topic, Message) ->
 %%------------------------------------------------------------------------------
 empty([]) -> true;
 empty(_)  -> false.
+
+%%%=============================================================================
+%%% Internal tests
+%%%=============================================================================
+
+-ifdef(TEST).
+
+-include_lib("eunit/include/eunit.hrl").
+
+ets_test_() -> {spawn, fun ets_matches_working/0}.
+
+ets_matches_working() ->
+    ?MODULE = ets:new(?MODULE, [ordered_set, protected, named_table]),
+
+    Subscr1 = #lbm_nomq_subscr{m = m, f = f, as = [], mon = undefined},
+    Subscr2 = #lbm_nomq_subscr{m = m, f = f, as = [], mon = self()},
+
+    ?assertEqual([], all_topics()),
+
+    ?assertEqual([topic], subscribe(topic, Subscr1)),
+    ?assertEqual([], subscribe(topic, Subscr1)),
+    ?assertEqual([topic], subscribe(topic, Subscr2)),
+    ?assertEqual([], subscribe(topic, Subscr2)),
+    ?assertEqual([topic], all_topics()),
+
+    ?assertEqual([], unsubscribe(topic, [Subscr1])),
+    ?assertEqual([Subscr2], subscribers(topic)),
+    ?assertEqual([topic], unsubscribe(topic, [Subscr2])),
+    ?assertEqual([], subscribers(topic)),
+    ?assertEqual([], all_topics()),
+
+    ?assertEqual([topic], subscribe(topic, Subscr1)),
+    ?assertEqual([], subscribe(topic, Subscr1)),
+    ?assertEqual([topic], subscribe(topic, Subscr2)),
+    ?assertEqual([], subscribe(topic, Subscr2)),
+    ?assertEqual([topic], all_topics()),
+
+    ?assertEqual([], unsubscribe(self())),
+    ?assertEqual([Subscr1], subscribers(topic)),
+    ?assertEqual([topic], all_topics()).
+
+-endif.

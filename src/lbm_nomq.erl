@@ -18,17 +18,26 @@
 %%% OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 %%%
 %%% @doc
-%%% A simple implementation of a reliable message queue mechanism.
+%%% A simple, distributed, message distribution framework with message queue
+%%% semantics (publish/subscribe), that is actually not really a message queue.
+%%% It uses Erlang terms and distributed Erlang.
 %%%
-%%% It is based on the principle, that messages are safest when they reside in
-%%% the originator until they have been processed by a subscriber. This is
-%%% achieved by a mechanism similar to a blocking queue. The originator will be
-%%% blocked until the message has been received *and* handled by exactly one
-%%% subscriber. Thus, this mechanism is well-suited for applications with many
-%%% concurrent producers that produce a moderate amount of messages each.
+%%% `lbm_nomq' is based on the principle, that messages are safest when they
+%%% reside in the originator until they have been delivered to/processed by a
+%%% subscriber. This is achieved by a mechanism similar to a blocking queue. The
+%%% originator will be blocked until the message has been received (and
+%%% eventually handled) by exactly one subscriber. Thus, this mechanism is
+%%% well-suited for applications with many concurrent producers that produce a
+%%% moderate amount of messages each.
 %%%
-%%% In a nutshell the application provides distributed `gen:call` to one
-%%% subscriber of a group, with failover/redundancy and grouping of subscribers.
+%%% In a nutshell `lbm_nomq' allows sending terms over logical, topic-based
+%%% channels to subscribed MFAs. In the case, the subscribed MFAs adheres to
+%%% `gen:call/4' semantics, message distribution is guaranteed to be reliable.
+%%%
+%%% It is possible to have multiple subscribers for a topic, however, `lbm_nomq'
+%%% will deliver a message to exactly one of the subscribed MFAs (randomly
+%%% chosen). This is useful to support active/active redundant subscribers
+%%% sharing a common state.
 %%% @end
 %%%=============================================================================
 
@@ -41,6 +50,7 @@
 -export([subscribe_server/1,
          subscribe_fsm/1,
          subscribe/2,
+         subscribe/3,
          subscribers/1,
          push/2,
          push/3,
@@ -53,11 +63,12 @@
 %% supervisor callbacks
 -export([init/1]).
 
--type topic()  :: any().
--type mfargs() :: {module(), atom(), [term()]}.
--type option() :: no_wait.
+-type topic()            :: any().
+-type mfargs()           :: {module(), atom(), [term()]}.
+-type subscribe_option() :: {monitor, PidOrLocalName :: pid() | atom()}.
+-type push_option()      :: no_wait.
 
--export_type([topic/0, mfargs/0, option/0]).
+-export_type([topic/0, mfargs/0, subscribe_option/0, push_option/0]).
 
 -include("lbm_nomq.hrl").
 
@@ -69,7 +80,7 @@
 
 %%------------------------------------------------------------------------------
 %% @doc
-%% Similar to {@link subscribe/2} with `MFA' set to
+%% Similar to {@link subscribe/2} with `MFAs' set to
 %% `{gen_server, call, [self()]}'. The subscribed `gen_server' will receive the
 %% pushed messages in its `handle_call/3' function.
 %% @end
@@ -79,8 +90,8 @@ subscribe_server(Topic) -> subscribe(Topic, {gen_server, call, [self()]}).
 
 %%------------------------------------------------------------------------------
 %% @doc
-%% Similar to {@link subscribe/2} with `MFA' set to
-%% `{gen_fsm, sync_send_event, [self()]}'.  The subscribed `gen_fsm' will
+%% Similar to {@link subscribe/2} with `MFAs' set to
+%% `{gen_fsm, sync_send_event, [self()]}'. The subscribed `gen_fsm' will
 %% receive the pushed messages in its `StateName/3' function.
 %% @end
 %%------------------------------------------------------------------------------
@@ -89,32 +100,57 @@ subscribe_fsm(Topic) -> subscribe(Topic, {gen_fsm, sync_send_event, [self()]}).
 
 %%------------------------------------------------------------------------------
 %% @doc
-%% Subscribes `MFA' as listener for a certain topic. Messages will be delivered
-%% to the process using `erlang:appy(M, F, As ++ [Message, Timeout])'. The
-%% function must adhere to the `gen:call/4' protocol. This means that if the
-%% function returns without exiting, the message is considered to be consumed
-%% successfully.
-%%
-%% It is possible to have multiple subscribers for a topic. However, a message
-%% will be pushed to at most one subscriber. The subscriber for a message will
-%% be chosen randomly.
-%%
-%% It is recommended to have a limited amount of subscribers for a topic, e.g.
-%% let's say a maximum of 3-5. Subscribers will be unsubscribed automatically
-%% when message delivery fails, e.g. when a subscriber process exits.
+%% Similar to {@link subscribe/3} with `Options' set to `[]'.
 %% @end
 %%------------------------------------------------------------------------------
 -spec subscribe(topic(), mfargs()) -> ok | {error, term()}.
-subscribe(Topic, {M, F, As}) when is_list(As) ->
+subscribe(Topic, MFAs) -> subscribe(Topic, MFAs, []).
+
+%%------------------------------------------------------------------------------
+%% @doc
+%% Subscribes `MFAs' as listener for a certain topic. Messages will be delivered
+%% to the process using either `erlang:apply(M, F, As ++ [Message, Timeout])' or
+%% `erlang:apply(M, F, As ++ [Message])' (whatever is available, where the
+%% timeout version is preferred). If the function adheres to the `gen:call/4'
+%% protocol message delivery will be reliable. This means that if the function
+%% returns without exiting, the message is considered to be consumed
+%% successfully.
+%%
+%% It is possible to have multiple subscribers for a topic. However, a message
+%% will be pushed to exactly one subscriber. The subscriber for a message will
+%% be chosen randomly.
+%%
+%% It is recommended to have a limited amount of subscribers for a topic, e.g.
+%% let's say a maximum of 3-5. There's no explicit `unsubscribe' in `lbm_nomq'.
+%% Subscriptions will be discarded automatically, when the applied `MFAs' raises
+%% an exception, error or exit. For functions that always succeed `lbm_nomq'
+%% offers the possibility to provide an owner process id that is associated with
+%% the subscription, see the `Options' section below for more details.
+%%
+%% The only option currently supported, is the `{monitor, PidOrLocalName}'
+%% option. This should be used when subscribing `MFAs' that do not adhere the
+%% `gen:call/4' protocol, since `lbm_nomq' can only remove subscriptions when
+%% a push attempt raises an exception, error or exit. Providing a process id or
+%% local name associates this process with the given `MFAs' and will lead to
+%% unsubscription when the process exits, e.g. to subscribe `gen_server:cast/2'
+%% use someting like this:
+%% `lbm_nomq:subscribe(Topic, {gen_server, cast, [Pid]}, [{monitor, Pid}])'
+%% @end
+%%------------------------------------------------------------------------------
+-spec subscribe(topic(), mfargs(), [subscribe_option()]) -> ok | {error, term()}.
+subscribe(Topic, {M, F, As}, Options) when is_list(As) ->
     case code:ensure_loaded(M) of
+        {module, erlang} ->
+            %% cannot check for exported functions in the erlang module
+            Subscriber = new_subscriber(M, F, As, Options),
+            lbm_nomq_dist:add_subscriber(Topic, Subscriber);
         {module, M} ->
-            case erlang:function_exported(M, F, length(As) + 2) of
+            case exported(M, F, As) of
                 true ->
-                    add_subscriber(Topic, ?S(M, F, As));
-                false when M =:= erlang ->
-                    add_subscriber(Topic, ?S(M, F, As));
+                    Subscriber = new_subscriber(M, F, As, Options),
+                    lbm_nomq_dist:add_subscriber(Topic, Subscriber);
                 false ->
-                    {error, {undef, {F, length(As) + 1}}}
+                    {error, {undef, F}}
             end;
         Error ->
             Error
@@ -143,7 +179,7 @@ push(Topic, Message) -> push(Topic, Message, 5000).
 %% Similar to {@link push/4} with `Options' set to `[]'.
 %% @end
 %%------------------------------------------------------------------------------
--spec push(topic(), term(), non_neg_integer() | infinity) -> any().
+-spec push(topic(), term(), timeout()) -> any().
 push(Topic, Message, Timeout) -> push(Topic, Message, Timeout, []).
 
 %%------------------------------------------------------------------------------
@@ -168,7 +204,7 @@ push(Topic, Message, Timeout) -> push(Topic, Message, Timeout, []).
 %% instead.
 %% @end
 %%------------------------------------------------------------------------------
--spec push(topic(), term(), non_neg_integer() | infinity, [option()]) -> any().
+-spec push(topic(), term(), timeout(), [push_option()]) -> any().
 push(Topic, Message, Timeout, Options) ->
     Args = {Topic, Message, Timeout, Options},
     push_loop(get_subscribers(Topic), [], Args, Timeout).
@@ -211,8 +247,12 @@ init([]) -> {ok, {{one_for_one, 0, 1}, [lbm_nomq_dist:spec()]}}.
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-add_subscriber(Topic, Subscriber) ->
-    lbm_nomq_dist:add_subscriber(Topic, Subscriber).
+new_subscriber(M, F, As, [{monitor, Name}]) when is_atom(Name) ->
+    #lbm_nomq_subscr{m = M, f = F, as = As, mon = erlang:whereis(Name)};
+new_subscriber(M, F, As, [{monitor, Pid}]) when is_pid(Pid) ->
+    #lbm_nomq_subscr{m = M, f = F, as = As, mon = Pid};
+new_subscriber(M, F, As, _Opts) ->
+    #lbm_nomq_subscr{m = M, f = F, as = As}.
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -221,10 +261,10 @@ get_subscribers(Topic) -> shuffle(subscribers(Topic)).
 
 %%------------------------------------------------------------------------------
 %% @private
-%% Try to push a message reliably to exactly one subscriber. If no good
-%% subscribers can be found, the loop will block the caller until either new
-%% subscribers register and handle the message or the given timeout expires
-%% (unless the `no_wait' option is specified).
+%% Try to push a message to exactly one subscriber. If no good subscribers can
+%% be found, the loop will block the caller until either new subscribers
+%% register and handle the message or the given timeout expires (unless the
+%% `no_wait' option is specified).
 %%------------------------------------------------------------------------------
 push_loop([], BadSs, Args = {Topic, _, _, Opts}, Timeout) ->
     ok = exit_if_no_wait(Opts, Args),
@@ -237,7 +277,7 @@ push_loop([], BadSs, Args = {Topic, _, _, Opts}, Timeout) ->
     end;
 push_loop([S = ?S(M, F, As) | Ss], BadSs, Args = {Topic, Msg, _, _}, Timeout) ->
     StartTimestamp = os:timestamp(),
-    try erlang:apply(M, F, As ++ [Msg, Timeout]) of
+    try apply_mfas(M, F, As, Msg, Timeout) of
         Result ->
             ok = lbm_nomq_dist:del_subscribers(Topic, BadSs),
             Result
@@ -245,11 +285,7 @@ push_loop([S = ?S(M, F, As) | Ss], BadSs, Args = {Topic, Msg, _, _}, Timeout) ->
         exit:{timeout, _} ->
             %% subscriber is not dead, only overloaded... anyway Timeout is over
             exit({timeout, {?MODULE, push, tuple_to_list(Args)}});
-        exit:_  ->
-            NewTimeout = remaining_millis(Timeout, StartTimestamp),
-            push_loop(Ss, [S | BadSs], Args, NewTimeout);
-        error:badarg when M =:= gen_fsm, As =/= [], is_atom(hd(As)) ->
-            %% for gen_fsm, when sending to invalid (locally) registered name
+        _:_  ->
             NewTimeout = remaining_millis(Timeout, StartTimestamp),
             push_loop(Ss, [S | BadSs], Args, NewTimeout)
     end.
@@ -330,6 +366,25 @@ exit_if_no_wait(Opts, Args) ->
         false ->
             ok
     end.
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+apply_mfas(M, F, As, Msg, Timeout) ->
+    try
+        erlang:apply(M, F, As ++ [Msg, Timeout])
+    catch
+        error:undef ->
+            erlang:apply(M, F, As ++ [Msg])
+    end.
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+exported(M, F, As) ->
+    MinArity = length(As) + 1,
+    erlang:function_exported(M, F, MinArity)
+        orelse erlang:function_exported(M, F, MinArity + 1).
 
 %%------------------------------------------------------------------------------
 %% @private

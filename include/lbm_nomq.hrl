@@ -22,7 +22,11 @@
 -ifndef(lbm_nomq_hrl_).
 -define(lbm_nomq_hrl_, 1).
 
--record(lbm_nomq_subscr, {m :: module(), f :: atom(), as :: [term()]}).
+-record(lbm_nomq_subscr, {
+          m   :: module() | '_',
+          f   :: atom() | '_',
+          as  :: [term()] | '_',
+          mon :: pid()}).
 
 -define(UPDATE_MSG(Ref, Topic, Ss), {lbm_nomq, Ref, Topic, Ss}).
 
